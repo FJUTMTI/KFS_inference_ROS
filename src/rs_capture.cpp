@@ -92,8 +92,11 @@ bool RealSenseCapture::getFrame(cv::Mat& frame) {
     }
 }
 
-RealSenseCapture::Intrinsics RealSenseCapture::getIntrinsics() const {
-    Intrinsics intr{};
+int  RealSenseCapture::getWidth()  const { return pImpl->width; }
+int  RealSenseCapture::getHeight() const { return pImpl->height; }
+
+kfs::CameraIntrinsics RealSenseCapture::getIntrinsics() const {
+    kfs::CameraIntrinsics intr{};
     if (!pImpl->running) return intr;
 
     auto stream = pImpl->profile.get_stream(RS2_STREAM_COLOR)

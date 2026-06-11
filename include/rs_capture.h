@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kfs_core/icamera_capture.h"
 #include <opencv2/core.hpp>
 #include <memory>
 #include <string>
@@ -12,8 +13,10 @@
  *   - 帧率:   30 fps
  *   - 传感器: Rolling Shutter, 2MP
  *   - FOV:    69°×42°
+ *
+ * 实现 kfs::ICameraCapture 接口，可被 CameraFactory 透明创建。
  */
-class RealSenseCapture {
+class RealSenseCapture : public kfs::ICameraCapture {
 public:
     /**
      * @param width   彩色流宽 (默认 1920)
@@ -24,35 +27,22 @@ public:
                      int height = 1080,
                      int fps    = 30);
 
-    ~RealSenseCapture();
+    ~RealSenseCapture() override;
 
     // 不可拷贝
     RealSenseCapture(const RealSenseCapture&) = delete;
     RealSenseCapture& operator=(const RealSenseCapture&) = delete;
 
-    /// 启动相机流
-    bool start();
+    // ---- ICameraCapture 接口 ----
+    bool start()                override;
+    void stop()                 override;
+    bool isRunning() const      override;
+    bool getFrame(cv::Mat& frame) override;
 
-    /// 停止相机流
-    void stop();
+    int getWidth()  const override;
+    int getHeight() const override;
 
-    /// 是否正在运行
-    bool isRunning() const;
-
-    /**
-     * @brief 获取最新一帧 (阻塞)
-     * @param frame  输出 BGR 图像
-     * @return       成功获取返回 true
-     */
-    bool getFrame(cv::Mat& frame);
-
-    /// 获取相机内参 (用于坐标系转换)
-    struct Intrinsics {
-        float fx, fy;    // 焦距
-        float cx, cy;    // 主点
-        int   width, height;
-    };
-    Intrinsics getIntrinsics() const;
+    kfs::CameraIntrinsics getIntrinsics() const override;
 
 private:
     struct Impl;

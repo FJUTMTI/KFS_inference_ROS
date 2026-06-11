@@ -1,5 +1,6 @@
 #pragma once
 
+#include "kfs_core/icamera_capture.h"
 #include <opencv2/core.hpp>
 #include <memory>
 #include <string>
@@ -18,9 +19,9 @@ struct CameraResolution {
  * @brief USB / Video0 摄像头捕获器 (基于 OpenCV VideoCapture)
  *
  * 支持任意 V4L2 USB 摄像头, 可配置分辨率、帧率、设备号、曝光等参数。
- * 与 RealSenseCapture 保持一致的接口风格，方便在 main.cpp 中切换。
+ * 实现 kfs::ICameraCapture 接口，可被 CameraFactory 透明创建。
  */
-class USBCapture {
+class USBCapture : public kfs::ICameraCapture {
 public:
     /**
      * @brief 相机控制参数
@@ -50,44 +51,29 @@ public:
                int fps      = 30,
                const std::string& fourcc = "");
 
-    ~USBCapture();
+    ~USBCapture() override;
 
     // 不可拷贝
     USBCapture(const USBCapture&) = delete;
     USBCapture& operator=(const USBCapture&) = delete;
 
-    /// 启动摄像头
-    bool start();
+    // ---- ICameraCapture 接口 ----
+    bool start()                override;
+    void stop()                 override;
+    bool isRunning() const      override;
+    bool getFrame(cv::Mat& frame) override;
 
-    /// 停止摄像头
-    void stop();
+    int getWidth()  const override;
+    int getHeight() const override;
 
-    /// 是否正在运行
-    bool isRunning() const;
+    kfs::CameraIntrinsics getIntrinsics() const override;
 
-    /**
-     * @brief 获取最新一帧
-     * @param frame  输出 BGR 图像
-     * @return       成功获取返回 true
-     */
-    bool getFrame(cv::Mat& frame);
-
-    /// 获取实际分辨率 (可能与请求值不同)
-    int getWidth()  const;
-    int getHeight() const;
+    // ---- USBCapture 特有 ----
     int getFPS()    const;
     int getDeviceId() const;
 
-    /// 设置相机控制参数 (曝光/增益/亮度等), 在 start() 后调用
+    /// 设置相机控制参数 (曝光/增益/亮度等), 在 start() 前调用
     void applyControls(const CameraControls& ctrl);
-
-    /// 获取相机内参 (USB 相机无标定, 返回默认值)
-    struct Intrinsics {
-        float fx, fy;    // 焦距 (默认用 width/2 近似)
-        float cx, cy;    // 主点 (默认用 width/2, height/2)
-        int   width, height;
-    };
-    Intrinsics getIntrinsics() const;
 
     // ----------------------------------------------------------
     // 静态工具方法

@@ -23,5 +23,7 @@ model:
   input_size: 640
   conf_threshold: 0.25
   iou_threshold: 0.30
+  use_cuda: true          # 是否尝试 CUDA (失败自动回退 CPU)
+  class_names: ["R1", "T", "F"]
 display:
   debug: true

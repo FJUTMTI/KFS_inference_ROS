@@ -1,0 +1,7 @@
+# 推理控制命令
+# 上游功能包通过此 Service 控制推理启停
+
+bool enable               # request: true=启动推理, false=停止推理
+---
+bool success              # response: 操作是否成功
+string message            # 附加信息 (错误原因等)

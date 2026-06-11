@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(kfs_realsense_detect LANGUAGES CXX CUDA)
+project(kfs_core VERSION 1.0.0 LANGUAGES C CXX CUDA)
 
 # ============================================================
 # C++17 标准
@@ -23,6 +23,23 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 # ============================================================
+# CMake 模块路径
+# ============================================================
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+
+# ============================================================
+# 检测构建模式: colcon (ROS2) 或 独立 CMake
+# ============================================================
+find_package(ament_cmake QUIET)
+set(HAS_ROS2 ${ament_cmake_FOUND})
+
+if(HAS_ROS2)
+    message(STATUS "=== ROS2 / colcon 构建模式 ===")
+else()
+    message(STATUS "=== 独立 CMake 构建模式 (无 ROS2) ===")
+endif()
+
+# ============================================================
 # 依赖查找
 # ============================================================
 
@@ -34,26 +51,10 @@ message(STATUS "yaml-cpp found")
 find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio)
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 
-# --- ONNX Runtime ---
-find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
-    HINTS ${ONNXRUNTIME_DIR}/include
-          /usr/local/include/onnxruntime
-          /usr/include/onnxruntime)
-
-find_library(ONNXRUNTIME_LIB onnxruntime
-    HINTS ${ONNXRUNTIME_DIR}/lib
-          /usr/local/lib
-          /usr/lib)
-
-if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIB)
-    message(FATAL_ERROR
-        "ONNX Runtime 未找到！\n"
-        "请设置 ONNXRUNTIME_DIR 或安装:\n"
-        "  sudo apt install libonnxruntime-dev\n"
-        "或从 https://github.com/microsoft/onnxruntime/releases 下载")
-endif()
+# --- ONNX Runtime (通过 FindOnnxRuntime.cmake 模块) ---
+find_package(OnnxRuntime REQUIRED)
 message(STATUS "ONNX Runtime include: ${ONNXRUNTIME_INCLUDE_DIR}")
-message(STATUS "ONNX Runtime lib:     ${ONNXRUNTIME_LIB}")
+message(STATUS "ONNX Runtime lib:     ${ONNXRUNTIME_LIBRARY}")
 
 # --- librealsense2 ---
 find_package(realsense2 QUIET)
@@ -62,21 +63,20 @@ if(NOT realsense2_FOUND)
         HINTS /usr/local/include
               /usr/include)
 
-    find_library(REALSENSE_LIB realsense2
+    find_library(REALSENSE_LIBRARY realsense2
         HINTS /usr/local/lib
               /usr/lib)
 
-    if(REALSENSE_INCLUDE_DIR AND REALSENSE_LIB)
+    if(REALSENSE_INCLUDE_DIR AND REALSENSE_LIBRARY)
         set(realsense2_FOUND TRUE)
         set(realsense2_INCLUDE_DIR ${REALSENSE_INCLUDE_DIR})
-        set(realsense2_LIBRARY   ${REALSENSE_LIB})
+        set(realsense2_LIBRARY   ${REALSENSE_LIBRARY})
     endif()
 endif()
 
 if(realsense2_FOUND)
     message(STATUS "RealSense2 include: ${realsense2_INCLUDE_DIR}")
     message(STATUS "RealSense2 lib:     ${realsense2_LIBRARY}")
-    add_definitions(-DHAS_REALSENSE)
 else()
     message(WARNING
         "librealsense2 未找到！RealSense D415 功能不可用。\n"
@@ -85,39 +85,141 @@ else()
 endif()
 
 # ============================================================
-# 可执行目标
+# ROS2 依赖 (仅 colcon 模式)
 # ============================================================
-set(KFS_SOURCES
-    src/main.cpp
+if(HAS_ROS2)
+    find_package(rclcpp REQUIRED)
+    find_package(std_msgs REQUIRED)
+    find_package(std_srvs REQUIRED)
+    find_package(sensor_msgs REQUIRED)
+    find_package(cv_bridge REQUIRED)
+    find_package(rosidl_default_generators REQUIRED)
+endif()
+
+# ============================================================
+# ROS2 自定义接口 (msg / srv)
+# ============================================================
+if(HAS_ROS2)
+    rosidl_generate_interfaces(${PROJECT_NAME}
+        "msg/InferResult.msg"
+        "srv/SetInferState.srv"
+        DEPENDENCIES std_msgs
+    )
+endif()
+
+# ============================================================
+# KFS_CORE 共享库 (核心逻辑, 供 ROS2 节点 / CLI 链接)
+# ============================================================
+set(KFS_CORE_SOURCES
     src/yolo_detector.cpp
     src/usb_capture.cpp
+    src/config.cpp
+    src/camera_factory.cpp
+)
+
+set(KFS_CORE_HEADERS
+    include/yolo_detector.h
+    include/usb_capture.h
+    include/kfs_core/icamera_capture.h
+    include/kfs_core/config.h
+    include/kfs_core/camera_factory.h
 )
 
 if(realsense2_FOUND)
-    list(APPEND KFS_SOURCES src/rs_capture.cpp)
+    list(APPEND KFS_CORE_SOURCES src/rs_capture.cpp)
+    list(APPEND KFS_CORE_HEADERS include/rs_capture.h)
 endif()
 
-add_executable(kfs_detect ${KFS_SOURCES})
+add_library(kfs_core_lib SHARED ${KFS_CORE_SOURCES} ${KFS_CORE_HEADERS})
 
-target_include_directories(kfs_detect PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+target_include_directories(kfs_core_lib PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
     ${OpenCV_INCLUDE_DIRS}
     ${ONNXRUNTIME_INCLUDE_DIR}
 )
 
-if(realsense2_FOUND)
-    target_include_directories(kfs_detect PRIVATE ${realsense2_INCLUDE_DIR})
-endif()
-
-target_link_libraries(kfs_detect PRIVATE
+target_link_libraries(kfs_core_lib PUBLIC
     ${OpenCV_LIBS}
-    ${ONNXRUNTIME_LIB}
+    ${ONNXRUNTIME_LIBRARY}
     yaml-cpp
     pthread
 )
 
 if(realsense2_FOUND)
-    target_link_libraries(kfs_detect PRIVATE ${realsense2_LIBRARY})
+    target_include_directories(kfs_core_lib PUBLIC ${realsense2_INCLUDE_DIR})
+    target_link_libraries(kfs_core_lib PUBLIC ${realsense2_LIBRARY})
+endif()
+
+# 传递 HAS_REALSENSE 给库的使用者 (通过 target 而非全局)
+target_compile_definitions(kfs_core_lib PUBLIC
+    $<$<BOOL:${realsense2_FOUND}>:HAS_REALSENSE>
+)
+
+# ============================================================
+# CLI 可执行文件 (薄 Demo, 仅用于快速测试)
+# ============================================================
+add_executable(kfs_detect src/main.cpp)
+target_link_libraries(kfs_detect PRIVATE kfs_core_lib)
+
+# ============================================================
+# ROS2 推理节点 (仅 colcon 模式)
+# ============================================================
+if(HAS_ROS2)
+    add_executable(kfs_infer_node src/kfs_infer_node.cpp)
+
+    ament_target_dependencies(kfs_infer_node
+        rclcpp
+        std_msgs
+        std_srvs
+        sensor_msgs
+        cv_bridge
+    )
+
+    # 链接生成的接口 (头文件 + 类型支持)
+    rosidl_target_interfaces(kfs_infer_node
+        ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
+    target_link_libraries(kfs_infer_node kfs_core_lib)
+endif()
+
+# ============================================================
+# 安装规则
+# ============================================================
+include(GNUInstallDirs)
+
+# 库 + CLI 可执行文件
+install(TARGETS kfs_core_lib kfs_detect
+    EXPORT kfs_coreTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# 头文件
+install(FILES ${KFS_CORE_HEADERS}
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/kfs_core
+)
+
+# CMake 配置 (供其他项目 find_package)
+install(EXPORT kfs_coreTargets
+    FILE kfs_coreTargets.cmake
+    NAMESPACE kfs::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/kfs_core
+)
+
+install(FILES cmake/FindOnnxRuntime.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/kfs_core
+)
+
+# ROS2 节点 + 接口 (仅 colcon 模式)
+if(HAS_ROS2)
+    install(TARGETS kfs_infer_node
+        DESTINATION lib/${PROJECT_NAME}
+    )
+
+    # 接口安装由 rosidl_generate_interfaces 自动处理
+
+    ament_package()
 endif()
 
 # ============================================================

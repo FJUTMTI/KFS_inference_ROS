@@ -5,6 +5,13 @@
 #include <opencv2/core.hpp>
 
 // ============================================================
+// 前向声明 (避免对 kfs_core 的循环依赖)
+// ============================================================
+namespace kfs {
+struct ModelConfig;
+}
+
+// ============================================================
 // 检测结果结构体
 // ============================================================
 
@@ -52,15 +59,25 @@ struct FrameResult {
 class YoloDetector {
 public:
     /**
+     * @brief 从原始参数构造
      * @param model_path   ONNX 模型路径
+     * @param class_names  类别名列表 (长度 = 模型输出类别数)
      * @param input_size   模型输入尺寸 (默认 640)
      * @param conf_thresh  置信度阈值 (默认 0.25)
      * @param iou_thresh   NMS IOU 阈值 (默认 0.45)
+     * @param use_cuda     是否尝试 CUDA (默认 true, 失败回退 CPU)
      */
     YoloDetector(const std::string& model_path,
+                 const std::vector<std::string>& class_names = {"R1", "T", "F"},
                  int   input_size  = 640,
                  float conf_thresh = 0.25f,
-                 float iou_thresh  = 0.45f);
+                 float iou_thresh  = 0.45f,
+                 bool  use_cuda    = true);
+
+    /**
+     * @brief 从 ModelConfig 构造 (推荐, 用于 ROS2 集成)
+     */
+    explicit YoloDetector(const kfs::ModelConfig& cfg);
 
     ~YoloDetector();
 
@@ -75,11 +92,11 @@ public:
      */
     FrameResult detect(const cv::Mat& frame);
 
-    /// 3 类名称
-    static const std::vector<std::string>& classNames() {
-        static std::vector<std::string> names = {"R1", "T", "F"};
-        return names;
-    }
+    /// 返回类别名 (构造时设定)
+    const std::vector<std::string>& classNames() const;
+
+    /// 类别数量
+    int numClasses() const;
 
 private:
     struct Impl;

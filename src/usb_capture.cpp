@@ -95,8 +95,8 @@ int USBCapture::getHeight()const{return pImpl->realHeight;}
 int USBCapture::getFPS()const{return pImpl->realFPS;}
 int USBCapture::getDeviceId()const{return pImpl->deviceId;}
 void USBCapture::applyControls(const CameraControls& c){pImpl->pendingCtrls=c;}
-USBCapture::Intrinsics USBCapture::getIntrinsics()const{
-    Intrinsics in{}; in.width=pImpl->realWidth; in.height=pImpl->realHeight;
+kfs::CameraIntrinsics USBCapture::getIntrinsics()const{
+    kfs::CameraIntrinsics in{}; in.width=pImpl->realWidth; in.height=pImpl->realHeight;
     in.fx=in.cx=(float)pImpl->realWidth*.5f; in.fy=in.cy=(float)pImpl->realHeight*.5f;
     return in;
 }

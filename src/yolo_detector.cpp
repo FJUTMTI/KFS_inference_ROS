@@ -1,4 +1,5 @@
 #include "yolo_detector.h"
+#include "kfs_core/config.h"
 
 #include <onnxruntime_cxx_api.h>
 #include <opencv2/imgproc.hpp>
@@ -28,6 +29,8 @@ struct YoloDetector::Impl {
     // 参数
     float confThresh;
     float iouThresh;
+    std::vector<std::string> classNames_;
+    int numClasses_;
 
     // 预处理内存池 (CPU, 复用)
     std::vector<float> blob;
@@ -38,29 +41,38 @@ struct YoloDetector::Impl {
     bool   useCUDA;
 
     Impl(const std::string& modelPath,
+         const std::vector<std::string>& classNames,
          int inputSize,
          float confThresh,
-         float iouThresh)
+         float iouThresh,
+         bool  tryCUDA)
         : env(ORT_LOGGING_LEVEL_WARNING, "KFS_YOLO")
         , confThresh(confThresh)
         , iouThresh(iouThresh)
+        , classNames_(classNames)
+        , numClasses_(static_cast<int>(classNames.size()))
         , inputC(3), inputH(inputSize), inputW(inputSize)
         , cpuMemInfo(Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeCPU))
         , useCUDA(false)
     {
-        // 尝试 CUDA GPU 推理
-        try {
-            OrtCUDAProviderOptions cudaOpts;
-            cudaOpts.device_id = 0;
-            opts.AppendExecutionProvider_CUDA(cudaOpts);
-            useCUDA = true;
-            opts.SetIntraOpNumThreads(2);
-            std::cout << "[YOLO] CUDA GPU 推理已启用" << std::endl;
-        }
-        catch (const std::exception& e) {
-            useCUDA = false;
+        // 尝试 CUDA GPU 推理 (仅在 tryCUDA=true 时)
+        if (tryCUDA) {
+            try {
+                OrtCUDAProviderOptions cudaOpts;
+                cudaOpts.device_id = 0;
+                opts.AppendExecutionProvider_CUDA(cudaOpts);
+                useCUDA = true;
+                opts.SetIntraOpNumThreads(2);
+                std::cout << "[YOLO] CUDA GPU 推理已启用" << std::endl;
+            }
+            catch (const std::exception& e) {
+                useCUDA = false;
+                opts.SetIntraOpNumThreads(12);
+                std::cout << "[YOLO] CUDA 不可用, 回退 CPU: " << e.what() << std::endl;
+            }
+        } else {
             opts.SetIntraOpNumThreads(12);
-            std::cout << "[YOLO] CUDA 不可用, 回退 CPU: " << e.what() << std::endl;
+            std::cout << "[YOLO] CUDA 已禁用, 使用 CPU 推理 (线程数=12)" << std::endl;
         }
 
         opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -131,9 +143,7 @@ struct YoloDetector::Impl {
         int totalElements = static_cast<int>(output.size());
 
         // 从数据总量反推: total = numAnchors * stride, 其中 stride = 4 + numClasses
-        // numClasses 已知为 3, stride = 7
-        int numClasses = 3;
-        int stride = 4 + numClasses;  // 7
+        int stride = 4 + numClasses_;  // e.g. 4+3=7 for 3-class model
 
         if (totalElements % stride != 0) {
             std::cout << "[YOLO] 输出维度不匹配: total=" << totalElements
@@ -158,7 +168,7 @@ struct YoloDetector::Impl {
             // 找最大类别置信度
             float maxScore = 0.f;
             int   bestCls  = -1;
-            for (int c = 0; c < numClasses; ++c) {
+            for (int c = 0; c < numClasses_; ++c) {
                 float score = row[4 + c];
                 if (score > maxScore) {
                     maxScore = score;
@@ -182,7 +192,7 @@ struct YoloDetector::Impl {
 
             Detection det;
             det.class_id   = bestCls;
-            det.class_name = YoloDetector::classNames()[bestCls];
+            det.class_name = classNames_[bestCls];
             det.confidence = maxScore;
             det.corner_tl  = {x1, y1};
             det.corner_tr  = {x2, y1};
@@ -325,14 +335,30 @@ struct YoloDetector::Impl {
 // ============================================================
 
 YoloDetector::YoloDetector(const std::string& modelPath,
+                           const std::vector<std::string>& classNames,
                            int inputSize,
                            float confThresh,
-                           float iouThresh)
-    : pImpl(std::make_unique<Impl>(modelPath, inputSize, confThresh, iouThresh))
+                           float iouThresh,
+                           bool  useCUDA)
+    : pImpl(std::make_unique<Impl>(modelPath, classNames,
+                                    inputSize, confThresh, iouThresh, useCUDA))
+{}
+
+YoloDetector::YoloDetector(const kfs::ModelConfig& cfg)
+    : YoloDetector(cfg.path, cfg.classNames, cfg.inputSize,
+                   cfg.confThresh, cfg.iouThresh, cfg.useCUDA)
 {}
 
 YoloDetector::~YoloDetector() = default;
 
 FrameResult YoloDetector::detect(const cv::Mat& frame) {
     return pImpl->runInference(frame);
+}
+
+const std::vector<std::string>& YoloDetector::classNames() const {
+    return pImpl->classNames_;
+}
+
+int YoloDetector::numClasses() const {
+    return pImpl->numClasses_;
 }

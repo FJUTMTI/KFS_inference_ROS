@@ -37,11 +37,12 @@ kfs_infer_node (ROS2 Node)
 │   ├── RealSenseCapture (librealsense2)
 │   └── USBCapture       (OpenCV VideoCapture / V4L2)
 ├── YoloDetector         ← ONNX Runtime 推理
+├── WeaponheadDetector   ← 传统 OpenCV (可选, 松耦合, USB 虚焦 weaponhead 左右边界)
 ├── kfs::Config          ← YAML + ROS 参数配置
 └── kfs::CameraFactory   ← 相机工厂
 
 ROS2 通信:
-  [Pub]  ~/result        kfs_core/InferResult    — 检测结果
+  [Pub]  ~/result        kfs_core/InferResults   — 检测结果（数组，一帧一条，推荐）
   [Pub]  ~/debug_image   sensor_msgs/Image       — 标注画面
   [Pub]  ~/status        std_msgs/String         — 运行状态
   [Sub]  ~/enable        std_msgs/Bool           — 推理使能
@@ -99,30 +100,34 @@ sudo apt install -y librealsense2-dev
 
 ## 编译
 
+当前源码布局：工作空间根 `realsense_inference/` 下有一个 `kfs_detector/` 子目录作为 ROS2 功能包（包名 `kfs_core`）。
+
 ### 方式一：colcon (推荐，ROS2 原生)
 
 ```bash
-mkdir -p ~/ros2_ws/src
-cd ~/ros2_ws/src
-git clone https://github.com/<your-org>/KFS_inference_ROS.git kfs_core
-cd ~/ros2_ws
+# 假设当前在 realsense_inference/ 根目录（kfs_detector/ 是包源码）
 source /opt/ros/humble/setup.zsh
-colcon build --packages-select kfs_core --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --base-paths kfs_detector --packages-select kfs_core --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.zsh
 ```
 
 ### 方式二：独立 CMake (不依赖 colcon，但无 ROS2 节点)
 
 ```bash
-cd KFS_inference_ROS
+cd realsense_inference/kfs_detector
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 
-# 产物:
+# 产物（在 kfs_detector/build/ 下）:
 #   libkfs_core_lib.so  — 核心库
 #   kfs_detect          — CLI Demo
-#   kfs_infer_node      — ROS2 节点
+#   kfs_infer_node      — ROS2 节点（需 ROS2 环境）
+```
+
+从工作空间根可直接运行 CLI（无需 install）：
+```
+build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml ...
 ```
 
 ---
@@ -146,7 +151,9 @@ python scripts/export_onnx.py \
 
 ## 配置
 
-编辑 `config/kfs_config.yaml`，或通过 ROS2 参数覆盖：
+编辑 `kfs_detector/config/kfs_config.yaml`（从工作空间根运行时路径），或通过 ROS2 参数覆盖。
+
+关键新增：`detector.enable_weaponhead: true` 可与 YOLO 并行启用传统 OpenCV weaponhead 检测（USB 相机下识别虚焦中央物体轮廓左右边界）。
 
 ```yaml
 camera:
@@ -165,7 +172,7 @@ camera:
     sharpness: 50
 
 model:
-  path: models/kfs_yolo11_3class.onnx
+  path: kfs_detector/models/kfs_yolo11_3class.onnx
   input_size: 640
   conf_threshold: 0.25
   iou_threshold: 0.30
@@ -174,6 +181,10 @@ model:
 
 display:
   debug: true             # CLI Demo 用, ROS2 节点忽略
+
+detector:
+  type: yolo
+  enable_weaponhead: false   # 启用后与 YOLO 并行 (weaponhead_detector 传统 CV)
 ```
 
 ---
@@ -194,7 +205,7 @@ rqt_image_view /kfs_infer_node/debug_image
 # 动态调参
 ros2 run rqt_reconfigure rqt_reconfigure
 
-# 查看检测结果
+# 查看检测结果（现在是一帧一个数组消息）
 ros2 topic echo /kfs_infer_node/result
 
 # 控制推理启停
@@ -212,6 +223,8 @@ ros2 service call /kfs_infer_node/trigger std_srvs/srv/Trigger
 | `model_path` | string | — | ONNX 模型路径 |
 | `class_names` | string | — | 逗号分隔类别名, 如 `"R1,T,F"` |
 | `camera_type` | string | — | `usb` / `realsense` |
+| `detector_type` | string | — | `yolo` / `weaponhead_detector` |
+| `enable_weaponhead` | bool | — | 并行启用 weaponhead_detector (传统 OpenCV 虚焦物体左右边界) |
 | `usb_device` | int | 0 ~ 63 | USB 摄像头设备号 |
 | `usb_width` | int | 160 ~ 3840 | 分辨率宽 |
 | `usb_height` | int | 120 ~ 2160 | 分辨率高 |
@@ -221,8 +234,11 @@ ros2 service call /kfs_infer_node/trigger std_srvs/srv/Trigger
 
 ### CLI Demo (无 ROS2 环境)
 
+从工作空间根目录运行（推荐）：
+
 ```bash
-./build/kfs_detect --config config/kfs_config.yaml
+cd /home/lee/realsense_inference
+build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml
 
 # 按键:
 #   SPACE — 单次推理
@@ -231,12 +247,61 @@ ros2 service call /kfs_infer_node/trigger std_srvs/srv/Trigger
 #   Q/ESC — 退出
 ```
 
----
+( colcon build 后 `source install/setup.bash` 即可在 PATH 中直接使用 `kfs_detect`，但建议显式 --config 指向 kfs_detector/config/kfs_config.yaml )
 
-## 目录结构
+#### 使用测试图片验证 weaponhead_detector (推荐用于确认功能，无需相机)
+
+新结构下推荐命令会**自动创建临时文件夹并输出带标注的结果图像**（红线+文字标出左右边界像素）：
+
+```bash
+cd /home/lee/realsense_inference
+
+# 临时启用（测试后恢复）
+cp kfs_detector/config/kfs_config.yaml /tmp/kfs_config.bak
+sed -i 's/enable_weaponhead: false/enable_weaponhead: true/' kfs_detector/config/kfs_config.yaml
+
+# 运行（支持目录，一次测试 assets 全部图片）
+# 会创建 /tmp/kfs_weaponhead_test_YYYYMMDD_HHMMSS/ 并保存 01_marked.png 等
+build/kfs_core/kfs_detect --image kfs_detector/assets
+
+# 恢复
+mv /tmp/kfs_config.bak kfs_detector/config/kfs_config.yaml
+```
+
+输出示例:
 
 ```
-KFS_inference_ROS/
+[weaponhead] 左右边界像素: left=150  right=444  (宽度=294)
+...
+[SAVE] 标注图像已输出: /tmp/kfs_weaponhead_test_.../01_marked.png
+[INFO] 所有测试完成。临时文件夹: /tmp/kfs_weaponhead_test_...
+```
+
+这精确模拟了从 USB 相机视频流中识别武器头 (weaponhead) 虚焦物体轮廓的左右边界像素。
+```
+
+---
+
+## 目录结构 (工作空间视图)
+
+当前 README 已移至工作空间根目录。包源码位于 `kfs_detector/` 子目录下。
+
+```
+realsense_inference/                 # 工作空间根 (本 README 所在)
+├── README.md                        # 主文档（已移至上级）
+├── kfs_detector/                    # 功能包 (包名仍为 kfs_core)
+│   ├── CMakeLists.txt
+│   ├── package.xml
+│   ├── assets/                      # 测试图片 (用于 weaponhead 左右边界验证)
+│   ├── config/kfs_config.yaml
+│   ├── include/...
+│   ├── models/...
+│   ├── src/ (包含 weaponhead_detector.cpp 等)
+│   └── ...
+├── build/ install/ log/             # colcon 构建产物
+└── ...
+```
+
 ├── CMakeLists.txt              # CMake 构建 (colcon + 独立模式)
 ├── package.xml                 # ROS2 包描述
 │
@@ -245,6 +310,7 @@ KFS_inference_ROS/
 │
 ├── include/
 │   ├── yolo_detector.h         # YOLO 推理器 (public)
+│   ├── weaponhead_detector.h   # 传统 OpenCV weaponhead (松耦合, public)
 │   ├── usb_capture.h           # USB 摄像头 (public)
 │   ├── rs_capture.h            # RealSense 摄像头 (public, 条件编译)
 │   └── kfs_core/
@@ -254,6 +320,7 @@ KFS_inference_ROS/
 │
 ├── src/
 │   ├── yolo_detector.cpp       # ONNX Runtime 推理核心
+│   ├── weaponhead_detector.cpp # 传统 OpenCV weaponhead 轮廓检测 (松耦合)
 │   ├── usb_capture.cpp         # V4L2 USB 捕获
 │   ├── rs_capture.cpp          # RealSense 捕获 (条件编译)
 │   ├── config.cpp              # YAML 配置加载
@@ -262,7 +329,8 @@ KFS_inference_ROS/
 │   └── kfs_infer_node.cpp      # ROS2 推理节点
 │
 ├── msg/
-│   └── InferResult.msg         # 自定义消息: 检测结果
+│   ├── InferResult.msg         # 单检测框结构（InferResults 的元素类型）
+│   └── InferResults.msg        # 一帧完整检测结果（数组消息，推荐使用）
 │
 ├── srv/
 │   └── SetInferState.srv       # 自定义服务: 推理启停
@@ -291,17 +359,26 @@ target_link_libraries(your_node kfs::kfs_core)
 #include "kfs_core/config.h"
 #include "kfs_core/camera_factory.h"
 #include "yolo_detector.h"
+#include "weaponhead_detector.h"   // 可选, weaponhead_detector
 
 auto cfg = kfs::loadConfig("config.yaml");
 auto cam = kfs::CameraFactory::create(cfg);
 YoloDetector detector(cfg.model);
+
+// weaponhead_detector 松耦合可选 (并行使用, e.g. for usb camera + 虚焦 weaponhead)
+std::unique_ptr<WeaponheadDetector> wh;
+if (cfg.enableWeaponheadDetector) wh = std::make_unique<WeaponheadDetector>();
 
 cv::Mat frame;
 cam->start();
 while (rclcpp::ok()) {
     cam->getFrame(frame);
     auto result = detector.detect(frame);
-    // 处理 result.detections ...
+    if (wh) {
+        auto whr = wh->detect(frame);
+        for (auto& d : whr.detections) result.detections.push_back(d);  // 合并 OBJ
+    }
+    // 处理 result.detections ... (可能同时有 YOLO 的 R1/T/F 和 weaponhead 的 OBJ)
 }
 ```
 
@@ -372,11 +449,13 @@ realsense_inference/
 │   └── kfs_yolo11_3class.onnx  # ONNX 模型
 ├── include/
 │   ├── yolo_detector.h         # 推理核心
+│   ├── weaponhead_detector.h   # weaponhead CV 检测 (新增)
 │   ├── rs_capture.h            # RealSense D415 采集
 │   └── usb_capture.h           # USB 摄像头采集
 ├── src/
 │   ├── main.cpp                # 主程序
 │   ├── yolo_detector.cpp       # ONNX 推理实现
+│   ├── weaponhead_detector.cpp # weaponhead 实现 (新增)
 │   ├── rs_capture.cpp          # D415 实现
 │   └── usb_capture.cpp         # USB 实现
 ├── scripts/
@@ -418,6 +497,51 @@ int main() {
     return 0;
 }
 ```
+
+### 验证 weaponhead_detector (传统 OpenCV 武器头虚焦轮廓左右边界)
+
+由于文件结构已调整为更标准的 ROS2 功能包布局（源码位于 `kfs_detector/` 下），测试时请从工作空间根目录 (`realsense_inference/`) 运行，并使用完整相对路径。
+
+推荐新的测试命令（会自动建立临时文件夹并输出带标注的结果图像）：
+
+```bash
+cd /home/lee/realsense_inference
+
+# 1. 临时启用 weaponhead (测试后可改回 false)
+sed -i 's/enable_weaponhead: false/enable_weaponhead: true/' kfs_detector/config/kfs_config.yaml
+
+# 2. 运行测试 (推荐：传入 assets 目录，一次测试所有图片)
+#    命令会自动创建 /tmp/kfs_weaponhead_test_<时间戳>/ 并保存带红线标注左右边界的 PNG
+build/kfs_core/kfs_detect --image kfs_detector/assets
+
+# 单独测试一张:
+# build/kfs_core/kfs_detect --image kfs_detector/assets/01.png
+
+# 3. 测试完恢复
+sed -i 's/enable_weaponhead: true/enable_weaponhead: false/' kfs_detector/config/kfs_config.yaml
+```
+
+**新行为**：
+- 每次 `--image` 测试会自动在 `/tmp/` 下创建唯一临时文件夹，例如 `/tmp/kfs_weaponhead_test_20260624_171255/`
+- 在该文件夹中为每张输入图片生成 `<basename>_marked.png` （已用红线精确标出左右边界像素值、文字标签 "L:150" "R:444" 等）
+- 同时在终端清晰打印左右边界像素，方便确认。
+- 即使 `display.debug: false` 也会保存标注图；设为 true 可即时弹出窗口查看。
+
+示例终端输出片段：
+
+```
+[INFO] 图片测试模式启动
+       输入: kfs_detector/assets (共 2 张图)
+       临时输出文件夹: /tmp/kfs_weaponhead_test_20260624_171255
+...
+[weaponhead] 左右边界像素: left=150  right=444  (宽度=294)
+...
+[SAVE] 标注图像已输出: /tmp/kfs_weaponhead_test_.../01_marked.png
+[INFO] 所有测试完成。临时文件夹: /tmp/kfs_weaponhead_test_20260624_171255
+       请检查其中的 *_marked.png 确认 weaponhead 左右边界是否正确标出。
+```
+
+实际从 USB 相机获取视频流时，weaponhead_detector 会在每帧与 YOLO 并行运行，结果合并发布。
 
 ## ❔ ONNX 导出脚本详细帮助
 

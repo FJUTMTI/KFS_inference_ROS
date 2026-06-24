@@ -87,6 +87,18 @@ Config loadConfig(const std::string& yamlPath) {
         cfg.display.debug = yamlBool(disp, "debug", cfg.display.debug);
     }
 
+    // ---- detector (松耦合新增 weaponhead_detector 支持) ----
+    if (root["detector"]) {
+        auto det = root["detector"];
+        cfg.detectorType = yamlStr(det, "type", cfg.detectorType);
+        cfg.enableWeaponheadDetector = yamlBool(det, "enable_weaponhead", cfg.enableWeaponheadDetector);
+    }
+
+    // 也支持顶层 weaponhead_detector.enabled 作为备选
+    if (root["weaponhead_detector"] && root["weaponhead_detector"]["enabled"]) {
+        cfg.enableWeaponheadDetector = root["weaponhead_detector"]["enabled"].as<bool>();
+    }
+
     return cfg;
 }
 

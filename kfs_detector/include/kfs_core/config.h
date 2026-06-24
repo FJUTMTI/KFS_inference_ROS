@@ -56,6 +56,14 @@ struct Config {
     CameraControlsConfig controls;
     ModelConfig          model;
     DisplayConfig        display;
+
+    // 检测器类型 (保留向后, 默认 yolo)
+    std::string          detectorType = "yolo";
+
+    // 松耦合添加: weaponhead_detector (传统 OpenCV 虚焦物体左右边界检测)
+    // 当为 true 时, 与 YOLO 并行运行, 结果合并到同一帧 detections 中 (不同目标)
+    // 主要用于 USB 相机场景, 识别 assets/ 图片示例中的中央虚焦 weaponhead 轮廓
+    bool                 enableWeaponheadDetector = false;
 };
 
 // ============================================================

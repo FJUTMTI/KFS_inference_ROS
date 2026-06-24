@@ -1,5 +1,8 @@
 # 推理结果 — 单个检测框的核心信息
 # 供下游功能包订阅 (如: 跟踪、规划、可视化等)
+#
+# 注意：此消息现在主要作为 InferResults.msg 中的数组元素使用。
+# 直接订阅 ~/result 推荐使用 InferResults（一帧一个消息）。
 
 std_msgs/Header header    # 时间戳 + frame_id (关联相机坐标系)
 

@@ -2,7 +2,7 @@
 # KFS 目标检测 — 全局配置文件 (YAML)
 # ============================================================
 camera:
-  type: usb
+  type: realsense
   usb:
     device: 0
     width: 640
@@ -19,7 +19,8 @@ camera:
     white_balance: -1     # -1=自动白平衡
     sharpness: 50         # V4L2 范围 0~100, 默认 75
 model:
-  path: models/kfs_yolo11_3class.onnx
+  path: kfs_detector/models/kfs_yolo11_3class.onnx  # 相对工作空间根目录；若从 kfs_detector/ 内运行请改为 models/...
+
   input_size: 640
   conf_threshold: 0.25
   iou_threshold: 0.30
@@ -27,3 +28,14 @@ model:
   class_names: ["R1", "T", "F"]
 display:
   debug: true
+
+# ============================================================
+# 检测器类型 (松耦合添加，不影响 YOLO 主流程)
+# ============================================================
+detector:
+  type: yolo
+  enable_weaponhead: false  # 是否启用 weaponhead_detector (传统 OpenCV)
+                            # 启用后与 YOLO 并行运行, 合并输出不同目标的结果
+                            # 针对 USB 相机: 检测正中虚焦 weaponhead 物体轮廓的左右边界像素
+                            # 验证示例: assets/01.png , assets/02.png (输出 left/right x)
+

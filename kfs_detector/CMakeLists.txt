@@ -102,6 +102,7 @@ endif()
 if(HAS_ROS2)
     rosidl_generate_interfaces(${PROJECT_NAME}
         "msg/InferResult.msg"
+        "msg/InferResults.msg"
         "srv/SetInferState.srv"
         DEPENDENCIES std_msgs
     )
@@ -115,6 +116,7 @@ set(KFS_CORE_SOURCES
     src/usb_capture.cpp
     src/config.cpp
     src/camera_factory.cpp
+    src/weaponhead_detector.cpp
 )
 
 set(KFS_CORE_HEADERS
@@ -123,6 +125,7 @@ set(KFS_CORE_HEADERS
     include/kfs_core/icamera_capture.h
     include/kfs_core/config.h
     include/kfs_core/camera_factory.h
+    include/weaponhead_detector.h
 )
 
 if(realsense2_FOUND)
@@ -179,6 +182,11 @@ if(HAS_ROS2)
     # 链接生成的接口 (头文件 + 类型支持)
     rosidl_target_interfaces(kfs_infer_node
         ${PROJECT_NAME} "rosidl_typesupport_cpp")
+
+    # 确保能找到 rosidl 生成的 kfs_core/msg/*.hpp (在纯 cmake 构建中)
+    target_include_directories(kfs_infer_node PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}/rosidl_generator_cpp
+    )
 
     target_link_libraries(kfs_infer_node kfs_core_lib)
 endif()

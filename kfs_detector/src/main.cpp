@@ -18,6 +18,7 @@
 #include "kfs_core/camera_factory.h"
 #include "kfs_core/icamera_capture.h"
 #include "yolo_detector.h"
+#include "weaponhead_detector.h"
 #include "usb_capture.h"       // USBCapture::listDevices / listResolutions (静态方法)
 
 #include <opencv2/highgui.hpp>
@@ -33,6 +34,8 @@
 #include <thread>
 #include <cstdio>
 #include <memory>
+#include <filesystem>
+#include <algorithm>
 
 // ============================================================
 // 全局标志
@@ -48,18 +51,24 @@ static void signalHandler(int) {
 // ============================================================
 
 static void printUsage() {
-    std::cout << "用法: ./kfs_detect [--config PATH] [--list-cameras] [--help]\n\n"
+    std::cout << "用法: ./kfs_detect [--config PATH] [--list-cameras] [--image PATH] [--help]\n\n"
               << "== 选项 ==\n"
               << "  --config PATH       指定配置文件 (默认: config/kfs_config.yaml)\n"
               << "  --list-cameras      列出所有 USB 摄像头及支持的分辨率\n"
+              << "  --image PATH        使用静态图片/目录测试 (无相机)。\n"
+              << "                      - 单文件: --image assets/01.png\n"
+              << "                      - 目录:   --image assets/   (测试所有图片)\n"
+              << "                      每次运行会自动创建 /tmp/kfs_weaponhead_test_YYYYMMDD_HHMMSS/ \n"
+              << "                      并在其中保存带标注的 _marked.png 图像 (左右边界用红线+文字标出)\n"
+              << "                      (建议在配置中设置 detector.enable_weaponhead: true 及 display.debug: true)\n"
               << "  --help / -h         显示帮助\n\n"
               << "== 配置文件格式 ==\n"
               << "  所有参数统一在 YAML 文件中设置: config/kfs_config.yaml\n"
-              << "  包含: 相机类型/分辨率/帧率/编码/V4L2控制/模型参数/类别名/显示\n\n"
+              << "  包含: 相机类型/分辨率/帧率/编码/V4L2控制/模型参数/类别名/显示 + detector.enable_weaponhead\n\n"
               << "== ROS2 集成 ==\n"
               << "  此 CLI 仅为 Demo。ROS2 节点应直接链接 libkfs_core:\n"
               << "    target_link_libraries(your_ros2_node kfs::kfs_core)\n"
-              << "  然后使用 kfs::Config + kfs::CameraFactory + YoloDetector 即可。\n\n";
+              << "  然后使用 kfs::Config + kfs::CameraFactory + YoloDetector (+ WeaponheadDetector) 即可。\n\n";
     exit(0);
 }
 
@@ -211,11 +220,15 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signalHandler);
 
     // 解析命令行
-    std::string configPath = "config/kfs_config.yaml";
+    // 默认使用新结构下的路径 (从工作空间根目录运行时有效)
+    std::string configPath = "kfs_detector/config/kfs_config.yaml";
+    std::string testImagePath;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--config" && i + 1 < argc) {
             configPath = argv[++i];
+        } else if (arg == "--image" && i + 1 < argc) {
+            testImagePath = argv[++i];
         } else if (arg == "--list-cameras") {
             std::cout << "═══════════════════════════════════════════\n";
             std::cout << "  系统 USB 摄像头列表\n";
@@ -252,21 +265,161 @@ int main(int argc, char** argv) {
     // 加载 YAML 配置 (来自 kfs_core)
     kfs::Config cfg = kfs::loadConfig(configPath);
     std::cout << "[CONFIG] 已加载: " << configPath
-              << " | 类别数: " << cfg.model.classNames.size() << std::endl;
+              << " | detector: " << cfg.detectorType << std::endl;
 
     std::cout << "╔══════════════════════════════════════════╗\n";
     std::cout << "║   KFS 目标检测 — CLI Demo                ║\n";
     std::cout << "╚══════════════════════════════════════════╝\n\n";
 
-    // 1) 加载 YOLO 检测器 (使用 kfs::ModelConfig)
-    YoloDetector detector(cfg.model);
+    // 1) YOLO 始终加载 (主流程), weaponhead_detector 作为松耦合附加 (并行, 不同目标)
+    std::unique_ptr<YoloDetector> yolo_det = std::make_unique<YoloDetector>(cfg.model);
     std::cout << "[INFO] 模型类别: ";
-    for (const auto& name : detector.classNames()) {
+    for (const auto& name : yolo_det->classNames()) {
         std::cout << name << " ";
     }
     std::cout << std::endl;
 
+    std::unique_ptr<WeaponheadDetector> wh_det;
+    if (cfg.enableWeaponheadDetector || cfg.detectorType == "weaponhead_detector") {
+        wh_det = std::make_unique<WeaponheadDetector>();
+        std::cout << "[INFO] weaponhead_detector 已启用 (传统 OpenCV 并行) — 检测虚焦物体左右边界" << std::endl;
+    }
+
     // 2) 创建相机 (通过 CameraFactory, 返回 ICameraCapture 接口)
+    std::string windowName;
+
+    // === 图片测试模式 (无相机, 专为验证 weaponhead_detector 左右边界) ===
+    // 支持单文件或目录；自动创建 /tmp/kfs_weaponhead_test_时间戳/ 并保存带标注的图像
+    if (!testImagePath.empty()) {
+        std::vector<std::string> image_paths;
+        if (std::filesystem::is_directory(testImagePath)) {
+            for (const auto& entry : std::filesystem::directory_iterator(testImagePath)) {
+                if (entry.is_regular_file()) {
+                    auto p = entry.path();
+                    std::string ext = p.extension().string();
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp") {
+                        image_paths.push_back(p.string());
+                    }
+                }
+            }
+            std::sort(image_paths.begin(), image_paths.end());
+        } else if (std::filesystem::exists(testImagePath)) {
+            image_paths.push_back(testImagePath);
+        }
+
+        if (image_paths.empty()) {
+            std::cerr << "[ERROR] 无效的 --image 路径 (不是图片或目录内无图片): " << testImagePath << std::endl;
+            return 1;
+        }
+
+        // 创建唯一临时测试文件夹
+        auto now_time = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+        std::stringstream ts_ss;
+        ts_ss << std::put_time(std::localtime(&now_time), "%Y%m%d_%H%M%S");
+        std::string test_dir = "/tmp/kfs_weaponhead_test_" + ts_ss.str();
+        std::filesystem::create_directories(test_dir);
+        std::cout << "[INFO] 图片测试模式启动\n";
+        std::cout << "       输入: " << testImagePath << " (共 " << image_paths.size() << " 张图)\n";
+        std::cout << "       临时输出文件夹: " << test_dir << std::endl;
+
+        for (const auto& img_path : image_paths) {
+            cv::Mat frame = cv::imread(img_path);
+            if (frame.empty()) {
+                std::cerr << "[WARN] 跳过无法读取的图片: " << img_path << std::endl;
+                continue;
+            }
+
+            FrameResult result;
+            if (yolo_det) {
+                result = yolo_det->detect(frame);
+            }
+            if (wh_det) {
+                auto wh_res = wh_det->detect(frame);
+                for (auto& d : wh_res.detections) {
+                    result.detections.push_back(std::move(d));
+                }
+                if (result.inference_ms <= 0) result.inference_ms = wh_res.inference_ms;
+                else result.inference_ms += wh_res.inference_ms;
+            }
+
+            // 特别输出 weaponhead 的左右边界 (用户确认用)
+            std::cout << "\n═══════════════════════════════════════════\n";
+            std::cout << "  WeaponheadDetector 测试结果\n";
+            std::cout << "  文件: " << img_path << "  (" << frame.cols << "×" << frame.rows << ")\n";
+            std::cout << "───────────────────────────────────────────\n";
+            bool found_wh = false;
+            for (const auto& d : result.detections) {
+                if (d.class_name == "OBJ" || d.class_name == "weaponhead") {
+                    found_wh = true;
+                    int left  = static_cast<int>(std::round(d.corner_tl.x));
+                    int right = static_cast<int>(std::round(d.corner_br.x));
+                    int top   = static_cast<int>(std::round(d.corner_tl.y));
+                    int bot   = static_cast<int>(std::round(d.corner_br.y));
+                    std::cout << "  [weaponhead] 左右边界像素: left=" << left
+                              << "  right=" << right
+                              << "  (宽度=" << (right - left) << ")\n";
+                    std::cout << "                 垂直带: top=" << top << " bot=" << bot << "\n";
+                    std::cout << "                 中心: x=" << (left + right)/2 << "\n";
+                }
+            }
+            if (!found_wh) {
+                std::cout << "  (未启用 weaponhead_detector 或未检测到 OBJ)\n";
+                std::cout << "  提示: 在 config 中设置 detector.enable_weaponhead: true 再测试\n";
+            }
+            std::cout << "  总检测数: " << result.detections.size()
+                      << " | 耗时: " << result.inference_ms << " ms\n";
+            std::cout << "═══════════════════════════════════════════\n";
+
+            // 生成并保存带标注的结果图像 (始终保存到临时文件夹)
+            cv::Mat marked = frame.clone();
+            drawDebug(marked, result, 0.0, DetectMode::SINGLE_SHOT);
+
+            // 额外用红线 + 文字突出显示 weaponhead 左右边界像素
+            for (const auto& d : result.detections) {
+                if (d.class_name == "OBJ" || d.class_name == "weaponhead") {
+                    int left = static_cast<int>(std::round(d.corner_tl.x));
+                    int right = static_cast<int>(std::round(d.corner_br.x));
+                    // 红色垂直边界线
+                    cv::line(marked, cv::Point(left, 0), cv::Point(left, marked.rows - 1), cv::Scalar(0, 0, 255), 2);
+                    cv::line(marked, cv::Point(right, 0), cv::Point(right, marked.rows - 1), cv::Scalar(0, 0, 255), 2);
+                    // 像素标签
+                    std::string lbl_l = "L:" + std::to_string(left);
+                    std::string lbl_r = "R:" + std::to_string(right);
+                    cv::putText(marked, lbl_l, cv::Point(left + 8, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
+                    int r_text_x = std::max(5, right - 90);
+                    cv::putText(marked, lbl_r, cv::Point(r_text_x, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
+                    // 中心水平指示线
+                    int mid_y = (static_cast<int>(std::round(d.corner_tl.y)) + static_cast<int>(std::round(d.corner_br.y))) / 2;
+                    cv::line(marked, cv::Point(left, mid_y), cv::Point(right, mid_y), cv::Scalar(0, 255, 0), 1);
+                }
+            }
+
+            std::string base = std::filesystem::path(img_path).stem().string();
+            std::string out_path = test_dir + "/" + base + "_marked.png";
+            if (cv::imwrite(out_path, marked)) {
+                std::cout << "[SAVE] 标注图像已输出: " << out_path << std::endl;
+            } else {
+                std::cerr << "[WARN] 保存标注图像失败: " << out_path << std::endl;
+            }
+
+            // 如果 debug，显示窗口 (方便即时查看)
+            if (cfg.display.debug) {
+                cv::imshow("KFS Test - " + base, marked);
+                std::cout << "[INFO] 按任意键继续下一个 / 关闭窗口...\n";
+                cv::waitKey(0);
+            }
+        }
+
+        if (cfg.display.debug) {
+            cv::destroyAllWindows();
+        }
+        std::cout << "\n[INFO] 所有测试完成。临时文件夹: " << test_dir << std::endl;
+        std::cout << "       请检查其中的 *_marked.png 确认 weaponhead 左右边界是否正确标出。\n\n";
+        return 0;
+    }
+
+    // === 正常相机模式 ===
     auto camera = kfs::CameraFactory::create(cfg);
     if (!camera) {
         std::cerr << "[ERROR] 无法创建相机 (类型: " << cfg.cameraType << ")\n";
@@ -280,7 +433,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    std::string windowName = std::string("KFS Detection - ") + cfg.cameraType;
+    windowName = std::string("KFS Detection - ") + cfg.cameraType;
     std::cout << "[INFO] 实际分辨率: "
               << camera->getWidth() << "×"
               << camera->getHeight() << std::endl;
@@ -306,7 +459,7 @@ int main(int argc, char** argv) {
         cv::namedWindow(windowName, cv::WINDOW_NORMAL);
     }
 
-    std::cout << "\n[INFO] YOLO 模型已加载, 等待触发推理...\n"
+    std::cout << "\n[INFO] 检测器已就绪, 等待触发推理...\n"
               << (cfg.display.debug
                     ? "  按 SPACE 单次推理 | 按 D 持续推理 | Q/ESC 退出\n"
                     : "  按 Ctrl+C 退出\n")
@@ -324,7 +477,18 @@ int main(int argc, char** argv) {
                          || (detectMode == DetectMode::SINGLE_SHOT);
 
         if (shouldDetect) {
-            lastResult = detector.detect(frame);
+            if (yolo_det) {
+                lastResult = yolo_det->detect(frame);
+            }
+            if (wh_det) {
+                auto wh_res = wh_det->detect(frame);
+                // 松耦合并: weaponhead 结果追加 (不同目标 OBJ)
+                for (auto& d : wh_res.detections) {
+                    lastResult.detections.push_back(std::move(d));
+                }
+                if (lastResult.inference_ms <= 0) lastResult.inference_ms = wh_res.inference_ms;
+                else lastResult.inference_ms += wh_res.inference_ms;
+            }
             if (detectMode == DetectMode::SINGLE_SHOT) {
                 detectMode = DetectMode::IDLE;
             }

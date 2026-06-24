@@ -1,6 +1,13 @@
 build/
 screenshot_*.png
 
+# 测试时自动生成的临时文件夹和标注图像 (kfs_detect --image 模式)
+# 实际输出位于 /tmp/kfs_weaponhead_test_YYYYMMDD_HHMMSS/ 下
+kfs_weaponhead_test_*/
+test_output/
+*.marked.png
+marked_*.png
+
 # ROS2
 install/
 log/

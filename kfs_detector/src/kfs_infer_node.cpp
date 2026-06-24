@@ -12,9 +12,11 @@
  *     ~/trigger  (std_srvs/Trigger)        — 触发单次推理
  *
  *   [发布]
- *     ~/result       (kfs_core/InferResult)  — 检测结果 (每框独立)
+ *     ~/result       (kfs_core/InferResults) — 检测结果（一帧一个数组消息，推荐订阅此话题）
  *     ~/debug_image  (sensor_msgs/Image)     — 标注画面 (rqt/rviz 可视化)
  *     ~/status       (std_msgs/String)       — 状态文本
+ *
+ *     (旧的单框 InferResult 话题已废弃，改用数组形式)
  *
  *   [参数 — rqt_reconfigure 动态调节]
  *     config_path         — YAML 配置文件
@@ -29,6 +31,8 @@
  *     usb_height          — USB 分辨率高
  *     usb_fps             — USB 帧率
  *     usb_fourcc          — USB 编码 (MJPG / YUYV)
+ *     detector_type       — 检测器类型 (yolo / weaponhead_detector)
+ *     enable_weaponhead   — 是否并行启用 weaponhead_detector (传统 CV 虚焦 weaponhead 左右边界)
  *     inference_enabled   — 推理使能
  */
 
@@ -36,6 +40,7 @@
 #include "kfs_core/camera_factory.h"
 #include "kfs_core/icamera_capture.h"
 #include "yolo_detector.h"
+#include "weaponhead_detector.h"
 
 // ROS2
 #include <rclcpp/rclcpp.hpp>
@@ -46,6 +51,7 @@
 
 // 自定义接口
 #include "kfs_core/msg/infer_result.hpp"
+#include "kfs_core/msg/infer_results.hpp"
 #include "kfs_core/srv/set_infer_state.hpp"
 
 #include <cv_bridge/cv_bridge.h>
@@ -138,6 +144,8 @@ public:
         declareParam<std::string>("usb_fourcc",          "MJPG");
         declareParam<bool>       ("inference_enabled",   true);
         declareParam<int>        ("input_size",          640, 320, 1280);
+        declareParam<std::string>("detector_type",      "yolo");  // "yolo" | "weaponhead_detector"
+        declareParam<bool>       ("enable_weaponhead",    false);   // 与 YOLO 并行启用 weaponhead_detector (CV 虚焦左右边界)
 
         // 类别名作为 string 列表(逗号分隔), rqt 字符串参数编辑
         declareParam<std::string>("class_names", "R1,T,F");
@@ -149,7 +157,7 @@ public:
         }
 
         // ---- 发布者 ----
-        pub_result_     = this->create_publisher<kfs_core::msg::InferResult>("~/result", 10);
+        pub_results_    = this->create_publisher<kfs_core::msg::InferResults>("~/result", 10);
         pub_debug_      = this->create_publisher<sensor_msgs::msg::Image>("~/debug_image", 10);
         pub_status_     = this->create_publisher<std_msgs::msg::String>("~/status", 10);
 
@@ -190,10 +198,12 @@ public:
             std::chrono::milliseconds(33),
             [this]() { loopOnce(); });
 
+        size_t cls_count = yolo_detector_ ? yolo_detector_->classNames().size() : 0;
         RCLCPP_INFO(this->get_logger(),
-                    "节点启动 | 相机:%s | 类别:%zu | debug_image:%s",
+                    "节点启动 | 相机:%s | detector:%s | 类别/模式:%zu | debug_image:%s",
                     cfg_.cameraType.c_str(),
-                    detector_->classNames().size(),
+                    cfg_.detectorType.c_str(),
+                    cls_count,
                     pub_debug_->get_subscription_count() > 0 ? "ON" : "OFF");
     }
 
@@ -258,6 +268,9 @@ private:
         cfg.model.useCUDA            = getParam<bool>("use_cuda");
         cfg.display.debug            = false; // 无头模式
 
+        cfg.detectorType             = getParam<std::string>("detector_type");
+        cfg.enableWeaponheadDetector = getParam<bool>("enable_weaponhead");
+
         // 类别名解析
         auto clsStr = getParam<std::string>("class_names");
         cfg.model.classNames.clear();
@@ -294,12 +307,18 @@ private:
             return false;
         }
 
-        detector_ = std::make_unique<YoloDetector>(cfg_.model);
+        // YOLO 始终创建 (主检测)
+        yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
+        // weaponhead_detector 松耦合附加 (与 YOLO 并行, 检测不同目标)
+        if (cfg_.enableWeaponheadDetector || cfg_.detectorType == "weaponhead_detector") {
+            wh_detector_ = std::make_unique<WeaponheadDetector>();
+        }
 
         RCLCPP_INFO(this->get_logger(),
-                    "相机:%dx%d | 模型:%s | conf:%.2f iou:%.2f cuda:%d",
+                    "相机:%dx%d | 模型:%s | wh:%s | conf:%.2f iou:%.2f cuda:%d",
                     camera_->getWidth(), camera_->getHeight(),
                     cfg_.model.path.c_str(),
+                    (wh_detector_ ? "ON" : "OFF"),
                     cfg_.model.confThresh, cfg_.model.iouThresh, cfg_.model.useCUDA);
         return true;
     }
@@ -324,12 +343,14 @@ private:
                 n == "usb_height" || n == "usb_fps" || n == "usb_fourcc") {
                 needRebuildCamera = true;
             }
+            if (n == "detector_type" || n == "enable_weaponhead" || n == "config_path") {
+                needRebuildDetector = true;
+            }
             if (n == "inference_enabled") {
                 inference_enabled_.store(p.get_value<bool>());
             }
             if (n == "config_path") {
-                needRebuildDetector = true;
-                needRebuildCamera   = true;
+                needRebuildCamera = true;
             }
         }
 
@@ -353,15 +374,20 @@ private:
             }
         }
 
-        // 重建检测器
+        // 重建检测器 (YOLO + 可选 weaponhead_detector 松耦合并行)
         if (needRebuildDetector) {
             std::lock_guard<std::mutex> lock(mtx_);
             if (!needRebuildCamera) cfg_ = buildConfig();
-            detector_.reset();
+            yolo_detector_.reset();
+            wh_detector_.reset();
             try {
-                detector_ = std::make_unique<YoloDetector>(cfg_.model);
+                yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
+                if (cfg_.enableWeaponheadDetector || cfg_.detectorType == "weaponhead_detector") {
+                    wh_detector_ = std::make_unique<WeaponheadDetector>();
+                }
                 RCLCPP_INFO(this->get_logger(),
-                            "检测器已重载 | conf:%.2f iou:%.2f cuda:%d",
+                            "检测器已重载 | wh:%s | conf:%.2f iou:%.2f cuda:%d",
+                            (wh_detector_ ? "ON" : "OFF"),
                             cfg_.model.confThresh, cfg_.model.iouThresh,
                             cfg_.model.useCUDA);
             } catch (const std::exception& e) {
@@ -392,12 +418,28 @@ private:
         FrameResult result;
         result.frame_size = frame.size();
 
+        bool did_inference = false;
         if (shouldInfer || singleShot) {
-            result = detector_->detect(frame);
+            if (yolo_detector_) {
+                result = yolo_detector_->detect(frame);
+            }
+            if (wh_detector_) {
+                auto wh_res = wh_detector_->detect(frame);
+                // 松耦合: weaponhead 结果追加到 YOLO 结果中 (不同目标, e.g. OBJ)
+                for (auto& d : wh_res.detections) {
+                    result.detections.push_back(std::move(d));
+                }
+                if (result.inference_ms <= 0.0) {
+                    result.inference_ms = wh_res.inference_ms;
+                } else {
+                    result.inference_ms += wh_res.inference_ms;
+                }
+            }
+            did_inference = true;
         }
 
-        // 发布检测结果
-        if (!result.detections.empty()) {
+        // 发布检测结果（数组形式，一帧只发布一条消息）
+        if (did_inference) {
             publishResults(result);
         }
 
@@ -414,29 +456,44 @@ private:
     }
 
     // ----------------------------------------------------------
-    // 发布检测结果
+    // 发布检测结果（数组消息形式）
     // ----------------------------------------------------------
     void publishResults(const FrameResult& result) {
         auto stamp = this->now();
+        std::string frame_id = cfg_.cameraType + "_camera";
+
+        kfs_core::msg::InferResults msg;
+        msg.header.stamp    = stamp;
+        msg.header.frame_id = frame_id;
+
+        msg.inference_ms  = static_cast<float>(result.inference_ms);
+        msg.frame_width   = static_cast<uint32_t>(result.frame_size.width);
+        msg.frame_height  = static_cast<uint32_t>(result.frame_size.height);
+
+        // 把内部 Detection 转为 InferResult 并填入数组
         for (const auto& det : result.detections) {
-            kfs_core::msg::InferResult msg;
-            msg.header.stamp    = stamp;
-            msg.header.frame_id = cfg_.cameraType + "_camera";
+            kfs_core::msg::InferResult det_msg;
 
-            msg.class_id   = det.class_id;
-            msg.class_name = det.class_name;
-            msg.confidence = det.confidence;
+            // 元素消息的 header 留空（顶层 header 已包含时间戳和 frame_id）
+            // 如需可在此设置 det_msg.header = msg.header;
 
-            msg.center_x = (det.corner_tl.x + det.corner_tr.x +
-                            det.corner_br.x + det.corner_bl.x) * 0.25f;
-            msg.center_y = (det.corner_tl.y + det.corner_tr.y +
-                            det.corner_br.y + det.corner_bl.y) * 0.25f;
+            det_msg.class_id   = det.class_id;
+            det_msg.class_name = det.class_name;
+            det_msg.confidence = det.confidence;
 
-            msg.bbox_width  = det.corner_br.x - det.corner_tl.x;
-            msg.bbox_height = det.corner_br.y - det.corner_tl.y;
+            // 中心点取 4 个角点的平均值
+            det_msg.center_x = (det.corner_tl.x + det.corner_tr.x +
+                                det.corner_br.x + det.corner_bl.x) * 0.25f;
+            det_msg.center_y = (det.corner_tl.y + det.corner_tr.y +
+                                det.corner_br.y + det.corner_bl.y) * 0.25f;
 
-            pub_result_->publish(msg);
+            det_msg.bbox_width  = det.corner_br.x - det.corner_tl.x;
+            det_msg.bbox_height = det.corner_br.y - det.corner_tl.y;
+
+            msg.detections.push_back(det_msg);
         }
+
+        pub_results_->publish(msg);
     }
 
     // ----------------------------------------------------------
@@ -477,10 +534,12 @@ private:
     // ---- 核心 ----
     kfs::Config                          cfg_;
     std::unique_ptr<kfs::ICameraCapture> camera_;
-    std::unique_ptr<YoloDetector>        detector_;
+    // 检测器: 两种实现松耦合共存, 运行时根据 cfg.detectorType 选择其一
+    std::unique_ptr<YoloDetector>        yolo_detector_;
+    std::unique_ptr<WeaponheadDetector>  wh_detector_;
 
     // ---- ROS2 ----
-    rclcpp::Publisher<kfs_core::msg::InferResult>::SharedPtr  pub_result_;
+    rclcpp::Publisher<kfs_core::msg::InferResults>::SharedPtr  pub_results_;
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr     pub_debug_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr       pub_status_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr      sub_enable_;

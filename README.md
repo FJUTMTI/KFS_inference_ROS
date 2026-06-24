@@ -1,4 +1,4 @@
-# KFS_inference_ROS
+# KFS 目标检测 (realsense_inference workspace)
 
 [![ROS2 Humble](https://img.shields.io/badge/ROS2-Humble-blue)](https://docs.ros.org/en/humble/)
 [![C++17](https://img.shields.io/badge/C++-17-00599C.svg)](https://en.cppreference.com/w/cpp/17)
@@ -135,7 +135,7 @@ build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml ...
 ## 模型导出
 
 ```bash
-cd KFS_inference_ROS
+cd realsense_inference/kfs_detector
 
 # 自动查找 best.pt 并导出 ONNX
 python scripts/export_onnx.py
@@ -438,30 +438,10 @@ struct Detection {
 
 ---
 
-## 目录结构
+## 真实部署提示
 
-```
-realsense_inference/
-├── CMakeLists.txt
-├── config/
-│   └── kfs_config.yaml         # 全局 YAML 配置
-├── models/
-│   └── kfs_yolo11_3class.onnx  # ONNX 模型
-├── include/
-│   ├── yolo_detector.h         # 推理核心
-│   ├── weaponhead_detector.h   # weaponhead CV 检测 (新增)
-│   ├── rs_capture.h            # RealSense D415 采集
-│   └── usb_capture.h           # USB 摄像头采集
-├── src/
-│   ├── main.cpp                # 主程序
-│   ├── yolo_detector.cpp       # ONNX 推理实现
-│   ├── weaponhead_detector.cpp # weaponhead 实现 (新增)
-│   ├── rs_capture.cpp          # D415 实现
-│   └── usb_capture.cpp         # USB 实现
-├── scripts/
-│   └── export_onnx.py          # .pt → .onnx 导出
-└── README.md
-```
+实际项目中把 `kfs_detector/` 目录放到 ROS2 workspace 的 `src/` 下即可（目录名可重命名为 `kfs_core` 以匹配包名）。
+
 sudo usermod -aG video $USER
 # 重新登录生效
 ```
@@ -546,7 +526,7 @@ sed -i 's/enable_weaponhead: true/enable_weaponhead: false/' kfs_detector/config
 ## ❔ ONNX 导出脚本详细帮助
 
 ```bash
-cd ~/KFS_training/realsense_inference
+cd ~/realsense_inference/kfs_detector
 python scripts/export_onnx.py --help
 ```
 

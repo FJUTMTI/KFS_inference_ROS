@@ -236,16 +236,15 @@ endif()
 install(TARGETS kfs_detect RUNTIME DESTINATION bin)
 
 # ============================================================
-# 帮助信息
+# 帮助信息 (注意：当前源码在 kfs_detector/ 子目录，工作空间根有 build/)
 # ============================================================
 message(STATUS "")
 message(STATUS "========================================")
-message(STATUS "  KFS RealSense D415 推理模块")
-message(STATUS "  3 类检测: R1 / T / F")
-message(STATUS "  配置: config/kfs_config.yaml (YAML)")
+message(STATUS "  KFS 目标检测 (weaponhead + YOLO)")
+message(STATUS "  3 类检测: R1 / T / F  +  weaponhead_detector (左右边界)")
+message(STATUS "  配置: kfs_detector/config/kfs_config.yaml")
 message(STATUS "========================================")
-message(STATUS "  编译: mkdir build && cd build")
-message(STATUS "         cmake .. -DCMAKE_BUILD_TYPE=Release")
-message(STATUS "         make -j$(nproc)")
-message(STATUS "  运行: ./kfs_detect [--debug] [--model path]")
+message(STATUS "  colcon: 从工作空间根运行 colcon build --base-paths kfs_detector ...")
+message(STATUS "  standalone: cd kfs_detector; mkdir build; cd build; cmake .. ; make")
+message(STATUS "  运行测试: build/kfs_core/kfs_detect --image kfs_detector/assets")
 message(STATUS "========================================")

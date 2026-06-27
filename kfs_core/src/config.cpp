@@ -94,9 +94,27 @@ Config loadConfig(const std::string& yamlPath) {
         cfg.enableWeaponheadDetector = yamlBool(det, "enable_weaponhead", cfg.enableWeaponheadDetector);
     }
 
-    // 也支持顶层 weaponhead_detector.enabled 作为备选
-    if (root["weaponhead_detector"] && root["weaponhead_detector"]["enabled"]) {
-        cfg.enableWeaponheadDetector = root["weaponhead_detector"]["enabled"].as<bool>();
+    // ---- weaponhead_detector 参数 ----
+    if (root["weaponhead_detector"]) {
+        auto wh = root["weaponhead_detector"];
+        if (wh["enabled"]) {
+            cfg.enableWeaponheadDetector = wh["enabled"].as<bool>();
+        }
+        // A路: 梯度扫描
+        cfg.weaponhead.blurKernel    = yamlInt(wh, "blur_kernel",     cfg.weaponhead.blurKernel);
+        cfg.weaponhead.gradRatio     = yamlFloat(wh, "grad_ratio",   cfg.weaponhead.gradRatio);
+        cfg.weaponhead.searchBandV   = yamlInt(wh, "search_band_v", cfg.weaponhead.searchBandV);
+        cfg.weaponhead.minWidth      = yamlInt(wh, "min_width",      cfg.weaponhead.minWidth);
+        cfg.weaponhead.maxWidth      = yamlInt(wh, "max_width",      cfg.weaponhead.maxWidth);
+        cfg.weaponhead.darkMaxGray   = yamlInt(wh, "dark_max_gray",  cfg.weaponhead.darkMaxGray);
+        cfg.weaponhead.contrastRatio = yamlFloat(wh, "contrast_ratio",cfg.weaponhead.contrastRatio);
+        cfg.weaponhead.minHeight     = yamlInt(wh, "min_height",     cfg.weaponhead.minHeight);
+        cfg.weaponhead.maxDrift      = yamlInt(wh, "max_drift",      cfg.weaponhead.maxDrift);
+        // B路: blob 验证
+        cfg.weaponhead.blobGrayThr  = yamlInt(wh, "blob_gray_thr",  cfg.weaponhead.blobGrayThr);
+        cfg.weaponhead.blobMinArea  = yamlInt(wh, "blob_min_area",  cfg.weaponhead.blobMinArea);
+        cfg.weaponhead.blobMaxSat   = yamlFloat(wh, "blob_max_sat", cfg.weaponhead.blobMaxSat);
+        cfg.weaponhead.blobSolidity = yamlFloat(wh, "blob_solidity", cfg.weaponhead.blobSolidity);
     }
 
     return cfg;

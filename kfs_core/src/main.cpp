@@ -149,6 +149,24 @@ static void drawDebug(cv::Mat& frame, const FrameResult& result, double fps,
         cv::putText(frame, label.str(),
                     cv::Point(corners[0].x + 2, labelY),
                     fontFace, fontScale, cv::Scalar(255, 255, 255), 1);
+
+        // weaponhead 特殊高亮：实时 debug 模式下也绘制左右边界红线 + 像素标签 (类似测试模式)
+        if (det.class_name == "WEAPONHEAD" || det.class_name == "OBJ" || det.class_name == "weaponhead") {
+            int left = static_cast<int>(std::round(det.corner_tl.x));
+            int right = static_cast<int>(std::round(det.corner_br.x));
+            // 红色垂直边界线 (全高度，突出左右像素)
+            cv::line(frame, cv::Point(left, 0), cv::Point(left, frame.rows - 1), cv::Scalar(0, 0, 255), 2);
+            cv::line(frame, cv::Point(right, 0), cv::Point(right, frame.rows - 1), cv::Scalar(0, 0, 255), 2);
+            // 顶部像素标签
+            std::string lbl_l = "L:" + std::to_string(left);
+            std::string lbl_r = "R:" + std::to_string(right);
+            cv::putText(frame, lbl_l, cv::Point(left + 8, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
+            int r_text_x = std::max(5, right - 90);
+            cv::putText(frame, lbl_r, cv::Point(r_text_x, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
+            // 物体带中心水平指示线 (绿色)
+            int mid_y = (static_cast<int>(std::round(det.corner_tl.y)) + static_cast<int>(std::round(det.corner_br.y))) / 2;
+            cv::line(frame, cv::Point(left, mid_y), cv::Point(right, mid_y), cv::Scalar(0, 255, 0), 1);
+        }
     }
 
     // 左上角状态信息
@@ -350,13 +368,13 @@ int main(int argc, char** argv) {
             std::cout << "───────────────────────────────────────────\n";
             bool found_wh = false;
             for (const auto& d : result.detections) {
-                if (d.class_name == "OBJ" || d.class_name == "weaponhead") {
+                if (d.class_name == "WEAPONHEAD" || d.class_name == "OBJ" || d.class_name == "weaponhead") {
                     found_wh = true;
                     int left  = static_cast<int>(std::round(d.corner_tl.x));
                     int right = static_cast<int>(std::round(d.corner_br.x));
                     int top   = static_cast<int>(std::round(d.corner_tl.y));
                     int bot   = static_cast<int>(std::round(d.corner_br.y));
-                    std::cout << "  [weaponhead] 左右边界像素: left=" << left
+                    std::cout << "  [WEAPONHEAD] 左右边界像素: left=" << left
                               << "  right=" << right
                               << "  (宽度=" << (right - left) << ")\n";
                     std::cout << "                 垂直带: top=" << top << " bot=" << bot << "\n";
@@ -364,7 +382,7 @@ int main(int argc, char** argv) {
                 }
             }
             if (!found_wh) {
-                std::cout << "  (未启用 weaponhead_detector 或未检测到 OBJ)\n";
+                std::cout << "  (未启用 weaponhead_detector 或未检测到 WEAPONHEAD)\n";
                 std::cout << "  提示: 在 config 中设置 detector.enable_weaponhead: true 再测试\n";
             }
             std::cout << "  总检测数: " << result.detections.size()
@@ -372,28 +390,9 @@ int main(int argc, char** argv) {
             std::cout << "═══════════════════════════════════════════\n";
 
             // 生成并保存带标注的结果图像 (始终保存到临时文件夹)
+            // 注意：drawDebug 内部已包含 weaponhead 左右边界高亮绘制
             cv::Mat marked = frame.clone();
             drawDebug(marked, result, 0.0, DetectMode::SINGLE_SHOT);
-
-            // 额外用红线 + 文字突出显示 weaponhead 左右边界像素
-            for (const auto& d : result.detections) {
-                if (d.class_name == "OBJ" || d.class_name == "weaponhead") {
-                    int left = static_cast<int>(std::round(d.corner_tl.x));
-                    int right = static_cast<int>(std::round(d.corner_br.x));
-                    // 红色垂直边界线
-                    cv::line(marked, cv::Point(left, 0), cv::Point(left, marked.rows - 1), cv::Scalar(0, 0, 255), 2);
-                    cv::line(marked, cv::Point(right, 0), cv::Point(right, marked.rows - 1), cv::Scalar(0, 0, 255), 2);
-                    // 像素标签
-                    std::string lbl_l = "L:" + std::to_string(left);
-                    std::string lbl_r = "R:" + std::to_string(right);
-                    cv::putText(marked, lbl_l, cv::Point(left + 8, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
-                    int r_text_x = std::max(5, right - 90);
-                    cv::putText(marked, lbl_r, cv::Point(r_text_x, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
-                    // 中心水平指示线
-                    int mid_y = (static_cast<int>(std::round(d.corner_tl.y)) + static_cast<int>(std::round(d.corner_br.y))) / 2;
-                    cv::line(marked, cv::Point(left, mid_y), cv::Point(right, mid_y), cv::Scalar(0, 255, 0), 1);
-                }
-            }
 
             std::string base = std::filesystem::path(img_path).stem().string();
             std::string out_path = test_dir + "/" + base + "_marked.png";
@@ -482,7 +481,7 @@ int main(int argc, char** argv) {
             }
             if (wh_det) {
                 auto wh_res = wh_det->detect(frame);
-                // 松耦合并: weaponhead 结果追加 (不同目标 OBJ)
+                // 松耦合并: weaponhead 结果追加 (不同目标 WEAPONHEAD)
                 for (auto& d : wh_res.detections) {
                     lastResult.detections.push_back(std::move(d));
                 }

@@ -1,0 +1,59 @@
+# ============================================================
+# KFS 目标检测 — 全局配置文件 (YAML)
+# ============================================================
+camera:
+  type: usb
+  usb:
+    device: 0
+    width: 640
+    height: 480
+    fps: 60
+    fourcc: "MJPG"
+  controls:
+    auto_exposure: 0      # 0=自动曝光(V4L2:Aperture Priority), 1=手动
+    exposure: -1          # 手动曝光值 (仅 manual 模式)
+    gain: -1              # -1=不设置
+    brightness: 0
+    contrast: 50          # V4L2 范围 0~100, 默认 50
+    saturation: 64        # V4L2 范围 0~100, 默认 64
+    white_balance: -1     # -1=自动白平衡
+    sharpness: 50         # V4L2 范围 0~100, 默认 75
+model:
+  path: kfs_core/models/kfs_yolo11_3class.onnx  # 相对工作空间根目录；若从 kfs_core/ 内运行请改为 models/...
+
+  input_size: 640
+  conf_threshold: 0.25
+  iou_threshold: 0.30
+  use_cuda: true          # 是否尝试 CUDA (失败自动回退 CPU)
+  class_names: ["R1", "T", "F"]
+display:
+  debug: true
+
+# ============================================================
+# 检测器类型 (松耦合添加，不影响 YOLO 主流程)
+# ============================================================
+detector:
+  type: yolo
+  enable_weaponhead: true  # 是否启用 weaponhead_detector (传统 OpenCV)
+
+# ============================================================
+# weaponhead_detector 检测参数 (双路: 梯度扫描 + blob验证)
+# ============================================================
+weaponhead_detector:
+  enabled: true
+  # A路: 梯度扫描
+  blur_kernel: 21        # 高斯模糊核
+  grad_ratio: 0.35        # 梯度阈值比例
+  search_band_v: 140      # 垂直搜索范围
+  min_width: 16           # 最小行宽度
+  max_width: 300          # 最大行宽度
+  dark_max_gray: 100      # 行内灰度上限
+  contrast_ratio: 1.15    # 边缘对比度比
+  min_height: 14          # 最小有效行数
+  max_drift: 35           # 行聚类漂移上限
+  # B路: blob 验证
+  blob_gray_thr: 50       # 二值化阈值
+  blob_min_area: 500      # blob 最小面积
+  blob_max_sat: 80.0      # blob 饱和度上限
+  blob_solidity: 0.80     # blob 紧密度下限
+  max_aspect: 0.70          # 最大宽高比            

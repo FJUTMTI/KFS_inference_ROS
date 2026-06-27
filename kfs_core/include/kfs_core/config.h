@@ -46,6 +46,25 @@ struct DisplayConfig {
     bool debug = true;
 };
 
+/// weaponhead_detector 参数
+struct WeaponheadConfig {
+    // A路: 梯度扫描
+    int   blurKernel    = 21;
+    float gradRatio     = 0.35f;
+    int   searchBandV   = 140;
+    int   minWidth      = 16;
+    int   maxWidth      = 300;
+    int   darkMaxGray   = 100;
+    float contrastRatio = 1.15f;
+    int   minHeight     = 14;
+    int   maxDrift      = 35;
+    // B路: blob 验证
+    int   blobGrayThr   = 50;
+    int   blobMinArea   = 500;
+    float blobMaxSat    = 80.0f;
+    float blobSolidity  = 0.80f;  // blob 紧密度下限
+};
+
 // ============================================================
 // 全局配置 (YAML 映射)
 // ============================================================
@@ -64,6 +83,9 @@ struct Config {
     // 当为 true 时, 与 YOLO 并行运行, 结果合并到同一帧 detections 中 (不同目标)
     // 主要用于 USB 相机场景, 识别 assets/ 图片示例中的中央虚焦 weaponhead 轮廓
     bool                 enableWeaponheadDetector = false;
+
+    // weaponhead_detector 可调参数 (支持 YAML 配置)
+    WeaponheadConfig     weaponhead;
 };
 
 // ============================================================

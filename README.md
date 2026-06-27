@@ -100,26 +100,26 @@ sudo apt install -y librealsense2-dev
 
 ## 编译
 
-当前源码布局：工作空间根 `realsense_inference/` 下有一个 `kfs_detector/` 子目录作为 ROS2 功能包（包名 `kfs_core`）。
+当前源码布局：工作空间根 `realsense_inference/` 下有一个 `kfs_core/` 子目录作为 ROS2 功能包（包名 `kfs_core`）。
 
 ### 方式一：colcon (推荐，ROS2 原生)
 
 ```bash
-# 假设当前在 realsense_inference/ 根目录（kfs_detector/ 是包源码）
+# 假设当前在 realsense_inference/ 根目录（kfs_core/ 是包源码）
 source /opt/ros/humble/setup.zsh
-colcon build --base-paths kfs_detector --packages-select kfs_core --cmake-args -DCMAKE_BUILD_TYPE=Release
+colcon build --base-paths kfs_core --packages-select kfs_core --cmake-args -DCMAKE_BUILD_TYPE=Release
 source install/setup.zsh
 ```
 
 ### 方式二：独立 CMake (不依赖 colcon，但无 ROS2 节点)
 
 ```bash
-cd realsense_inference/kfs_detector
+cd realsense_inference/kfs_core
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 
-# 产物（在 kfs_detector/build/ 下）:
+# 产物（在 kfs_core/build/ 下）:
 #   libkfs_core_lib.so  — 核心库
 #   kfs_detect          — CLI Demo
 #   kfs_infer_node      — ROS2 节点（需 ROS2 环境）
@@ -127,7 +127,7 @@ make -j$(nproc)
 
 从工作空间根可直接运行 CLI（无需 install）：
 ```
-build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml ...
+build/kfs_core/kfs_detect --config kfs_core/config/kfs_config.yaml ...
 ```
 
 ---
@@ -135,7 +135,7 @@ build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml ...
 ## 模型导出
 
 ```bash
-cd realsense_inference/kfs_detector
+cd realsense_inference/kfs_core
 
 # 自动查找 best.pt 并导出 ONNX
 python scripts/export_onnx.py
@@ -151,7 +151,7 @@ python scripts/export_onnx.py \
 
 ## 配置
 
-编辑 `kfs_detector/config/kfs_config.yaml`（从工作空间根运行时路径），或通过 ROS2 参数覆盖。
+编辑 `kfs_core/config/kfs_config.yaml`（从工作空间根运行时路径），或通过 ROS2 参数覆盖。
 
 关键新增：`detector.enable_weaponhead: true` 可与 YOLO 并行启用传统 OpenCV weaponhead 检测（USB 相机下识别虚焦中央物体轮廓左右边界）。
 
@@ -172,7 +172,7 @@ camera:
     sharpness: 50
 
 model:
-  path: kfs_detector/models/kfs_yolo11_3class.onnx
+  path: kfs_core/models/kfs_yolo11_3class.onnx
   input_size: 640
   conf_threshold: 0.25
   iou_threshold: 0.30
@@ -238,7 +238,7 @@ ros2 service call /kfs_infer_node/trigger std_srvs/srv/Trigger
 
 ```bash
 cd /home/lee/realsense_inference
-build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml
+build/kfs_core/kfs_detect --config kfs_core/config/kfs_config.yaml
 
 # 按键:
 #   SPACE — 单次推理
@@ -247,7 +247,7 @@ build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml
 #   Q/ESC — 退出
 ```
 
-( colcon build 后 `source install/setup.bash` 即可在 PATH 中直接使用 `kfs_detect`，但建议显式 --config 指向 kfs_detector/config/kfs_config.yaml )
+( colcon build 后 `source install/setup.bash` 即可在 PATH 中直接使用 `kfs_detect`，但建议显式 --config 指向 kfs_core/config/kfs_config.yaml )
 
 #### 使用测试图片验证 weaponhead_detector (推荐用于确认功能，无需相机)
 
@@ -257,21 +257,21 @@ build/kfs_core/kfs_detect --config kfs_detector/config/kfs_config.yaml
 cd /home/lee/realsense_inference
 
 # 临时启用（测试后恢复）
-cp kfs_detector/config/kfs_config.yaml /tmp/kfs_config.bak
-sed -i 's/enable_weaponhead: false/enable_weaponhead: true/' kfs_detector/config/kfs_config.yaml
+cp kfs_core/config/kfs_config.yaml /tmp/kfs_config.bak
+sed -i 's/enable_weaponhead: false/enable_weaponhead: true/' kfs_core/config/kfs_config.yaml
 
 # 运行（支持目录，一次测试 assets 全部图片）
 # 会创建 /tmp/kfs_weaponhead_test_YYYYMMDD_HHMMSS/ 并保存 01_marked.png 等
-build/kfs_core/kfs_detect --image kfs_detector/assets
+build/kfs_core/kfs_detect --image kfs_core/assets
 
 # 恢复
-mv /tmp/kfs_config.bak kfs_detector/config/kfs_config.yaml
+mv /tmp/kfs_config.bak kfs_core/config/kfs_config.yaml
 ```
 
 输出示例:
 
 ```
-[weaponhead] 左右边界像素: left=150  right=444  (宽度=294)
+[WEAPONHEAD] 左右边界像素: left=150  right=444  (宽度=294)
 ...
 [SAVE] 标注图像已输出: /tmp/kfs_weaponhead_test_.../01_marked.png
 [INFO] 所有测试完成。临时文件夹: /tmp/kfs_weaponhead_test_...
@@ -284,12 +284,12 @@ mv /tmp/kfs_config.bak kfs_detector/config/kfs_config.yaml
 
 ## 目录结构 (工作空间视图)
 
-当前 README 已移至工作空间根目录。包源码位于 `kfs_detector/` 子目录下。
+当前 README 已移至工作空间根目录。包源码位于 `kfs_core/` 子目录下。
 
 ```
 realsense_inference/                 # 工作空间根 (本 README 所在)
 ├── README.md                        # 主文档（已移至上级）
-├── kfs_detector/                    # 功能包 (包名仍为 kfs_core)
+├── kfs_core/                    # 功能包 (包名仍为 kfs_core)
 │   ├── CMakeLists.txt
 │   ├── package.xml
 │   ├── assets/                      # 测试图片 (用于 weaponhead 左右边界验证)
@@ -376,9 +376,9 @@ while (rclcpp::ok()) {
     auto result = detector.detect(frame);
     if (wh) {
         auto whr = wh->detect(frame);
-        for (auto& d : whr.detections) result.detections.push_back(d);  // 合并 OBJ
+        for (auto& d : whr.detections) result.detections.push_back(d);  // 合并 WEAPONHEAD
     }
-    // 处理 result.detections ... (可能同时有 YOLO 的 R1/T/F 和 weaponhead 的 OBJ)
+    // 处理 result.detections ... (可能同时有 YOLO 的 R1/T/F 和 weaponhead 的 WEAPONHEAD)
 }
 ```
 
@@ -440,7 +440,7 @@ struct Detection {
 
 ## 真实部署提示
 
-实际项目中把 `kfs_detector/` 目录放到 ROS2 workspace 的 `src/` 下即可（目录名可重命名为 `kfs_core` 以匹配包名）。
+实际项目中把 `kfs_core/` 目录放到 ROS2 workspace 的 `src/` 下即可
 
 sudo usermod -aG video $USER
 # 重新登录生效
@@ -480,7 +480,7 @@ int main() {
 
 ### 验证 weaponhead_detector (传统 OpenCV 武器头虚焦轮廓左右边界)
 
-由于文件结构已调整为更标准的 ROS2 功能包布局（源码位于 `kfs_detector/` 下），测试时请从工作空间根目录 (`realsense_inference/`) 运行，并使用完整相对路径。
+由于文件结构已调整为更标准的 ROS2 功能包布局（源码位于 `kfs_core/` 下），测试时请从工作空间根目录 (`realsense_inference/`) 运行，并使用完整相对路径。
 
 推荐新的测试命令（会自动建立临时文件夹并输出带标注的结果图像）：
 
@@ -488,17 +488,17 @@ int main() {
 cd /home/lee/realsense_inference
 
 # 1. 临时启用 weaponhead (测试后可改回 false)
-sed -i 's/enable_weaponhead: false/enable_weaponhead: true/' kfs_detector/config/kfs_config.yaml
+sed -i 's/enable_weaponhead: false/enable_weaponhead: true/' kfs_core/config/kfs_config.yaml
 
 # 2. 运行测试 (推荐：传入 assets 目录，一次测试所有图片)
 #    命令会自动创建 /tmp/kfs_weaponhead_test_<时间戳>/ 并保存带红线标注左右边界的 PNG
-build/kfs_core/kfs_detect --image kfs_detector/assets
+build/kfs_core/kfs_detect --image kfs_core/assets
 
 # 单独测试一张:
-# build/kfs_core/kfs_detect --image kfs_detector/assets/01.png
+# build/kfs_core/kfs_detect --image kfs_core/assets/01.png
 
 # 3. 测试完恢复
-sed -i 's/enable_weaponhead: true/enable_weaponhead: false/' kfs_detector/config/kfs_config.yaml
+sed -i 's/enable_weaponhead: true/enable_weaponhead: false/' kfs_core/config/kfs_config.yaml
 ```
 
 **新行为**：
@@ -511,10 +511,10 @@ sed -i 's/enable_weaponhead: true/enable_weaponhead: false/' kfs_detector/config
 
 ```
 [INFO] 图片测试模式启动
-       输入: kfs_detector/assets (共 2 张图)
+       输入: kfs_core/assets (共 2 张图)
        临时输出文件夹: /tmp/kfs_weaponhead_test_20260624_171255
 ...
-[weaponhead] 左右边界像素: left=150  right=444  (宽度=294)
+[WEAPONHEAD] 左右边界像素: left=150  right=444  (宽度=294)
 ...
 [SAVE] 标注图像已输出: /tmp/kfs_weaponhead_test_.../01_marked.png
 [INFO] 所有测试完成。临时文件夹: /tmp/kfs_weaponhead_test_20260624_171255
@@ -526,7 +526,7 @@ sed -i 's/enable_weaponhead: true/enable_weaponhead: false/' kfs_detector/config
 ## ❔ ONNX 导出脚本详细帮助
 
 ```bash
-cd ~/realsense_inference/kfs_detector
+cd ~/realsense_inference/kfs_core
 python scripts/export_onnx.py --help
 ```
 

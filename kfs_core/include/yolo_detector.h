@@ -50,6 +50,7 @@ struct FrameResult {
     std::vector<Detection> detections;  // 所有检测框
     cv::Size frame_size;                // 原始帧尺寸 (1920×1080)
     double inference_ms;                // 推理耗时 (毫秒)
+    cv::Mat debug_image;                // 可选调试图像 (weaponhead 二值化等)
 };
 
 // ============================================================

@@ -44,6 +44,7 @@
 
 // ROS2
 #include <rclcpp/rclcpp.hpp>
+#include <ament_index_cpp/get_package_share_directory.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -56,12 +57,15 @@
 
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
 
 #include <memory>
 #include <atomic>
 #include <chrono>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <fstream>
 #include <mutex>
 
 // ============================================================
@@ -110,6 +114,24 @@ static cv::Mat drawDetections(const cv::Mat& src, const FrameResult& result,
         cv::putText(disp, label,
                     {corners[0].x + 2, labelY},
                     fontFace, fontScale, {255, 255, 255}, 1);
+
+        // weaponhead 特殊高亮：在 ROS debug_image 中实时绘制左右边界红线 + 像素标签
+        if (det.class_name == "WEAPONHEAD" || det.class_name == "OBJ" || det.class_name == "weaponhead") {
+            int left = static_cast<int>(std::round(det.corner_tl.x));
+            int right = static_cast<int>(std::round(det.corner_br.x));
+            // 红色垂直边界线 (全高度)
+            cv::line(disp, cv::Point(left, 0), cv::Point(left, disp.rows - 1), cv::Scalar(0, 0, 255), 2);
+            cv::line(disp, cv::Point(right, 0), cv::Point(right, disp.rows - 1), cv::Scalar(0, 0, 255), 2);
+            // 顶部像素标签
+            std::string lbl_l = "L:" + std::to_string(left);
+            std::string lbl_r = "R:" + std::to_string(right);
+            cv::putText(disp, lbl_l, cv::Point(left + 8, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
+            int r_text_x = std::max(5, right - 90);
+            cv::putText(disp, lbl_r, cv::Point(r_text_x, 35), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
+            // 物体带中心水平指示线
+            int mid_y = (static_cast<int>(std::round(det.corner_tl.y)) + static_cast<int>(std::round(det.corner_br.y))) / 2;
+            cv::line(disp, cv::Point(left, mid_y), cv::Point(right, mid_y), cv::Scalar(0, 255, 0), 1);
+        }
     }
 
     // 状态带
@@ -129,13 +151,25 @@ static cv::Mat drawDetections(const cv::Mat& src, const FrameResult& result,
 class KfsInferNode : public rclcpp::Node {
 public:
     KfsInferNode() : Node("kfs_infer_node") {
+        // 默认路径: 从工作空间根运行时使用的相对路径
+        std::string config_default = "kfs_core/config/kfs_config.yaml";
+        std::string model_default  = "kfs_core/models/kfs_yolo11_3class.onnx";
+        // 安装后优先使用 share 目录路径
+        try {
+            auto share_dir = ament_index_cpp::get_package_share_directory("kfs_core");
+            config_default = share_dir + "/config/kfs_config.yaml";
+            model_default  = share_dir + "/models/kfs_yolo11_3class.onnx";
+        } catch (const std::exception&) {
+            // 未安装时回退到相对路径 (从工作空间根运行)
+        }
+
         // ---- 声明全部参数 (支持 rqt_reconfigure 动态调节) ----
-        declareParam<std::string>("config_path",        "config/kfs_config.yaml");
+        declareParam<std::string>("config_path",        config_default);
         declareParam<bool>       ("debug_image",         true);
         declareParam<float>      ("conf_threshold",      0.25f, 0.0f, 1.0f);
         declareParam<float>      ("iou_threshold",       0.30f, 0.0f, 1.0f);
         declareParam<bool>       ("use_cuda",            true);
-        declareParam<std::string>("model_path",          "models/kfs_yolo11_3class.onnx");
+        declareParam<std::string>("model_path",          model_default);
         declareParam<std::string>("camera_type",         "usb");
         declareParam<int>        ("usb_device",          0, 0, 63);
         declareParam<int>        ("usb_width",           640, 160, 3840);
@@ -145,7 +179,22 @@ public:
         declareParam<bool>       ("inference_enabled",   true);
         declareParam<int>        ("input_size",          640, 320, 1280);
         declareParam<std::string>("detector_type",      "yolo");  // "yolo" | "weaponhead_detector"
-        declareParam<bool>       ("enable_weaponhead",    false);   // 与 YOLO 并行启用 weaponhead_detector (CV 虚焦左右边界)
+        declareParam<bool>       ("enable_weaponhead",    true);   // 与 YOLO 并行启用 weaponhead_detector (CV 虚焦左右边界)
+
+        // weaponhead_detector 参数 (动态调节)
+        declareParam<int>        ("wh_blur_kernel",      21,   3, 51);
+        declareParam<float>      ("wh_grad_ratio",       0.35f, 0.05f, 0.95f);
+        declareParam<int>        ("wh_search_band_v",    140,  20, 240);
+        declareParam<int>        ("wh_min_width",        16,   4,  100);
+        declareParam<int>        ("wh_max_width",        300,  30, 640);
+        declareParam<int>        ("wh_dark_max_gray",    100,   5,  200);
+        declareParam<float>      ("wh_contrast_ratio",   1.15f, 1.0f, 10.0f);
+        declareParam<int>        ("wh_min_height",       14,   2,  100);
+        declareParam<int>        ("wh_max_drift",        35,   2,  80);
+        declareParam<int>        ("wh_blob_gray_thr",    50,   10, 150);
+        declareParam<int>        ("wh_blob_min_area",    500,  100, 5000);
+        declareParam<float>      ("wh_blob_max_sat",     80.0f, 0.0f, 255.0f);
+        declareParam<float>      ("wh_blob_solidity",    0.80f, 0.50f, 1.0f);
 
         // 类别名作为 string 列表(逗号分隔), rqt 字符串参数编辑
         declareParam<std::string>("class_names", "R1,T,F");
@@ -185,6 +234,57 @@ public:
                 trigger_single_shot_.store(true);
                 res->success = true;
                 res->message = "单次推理已触发";
+            });
+
+        srv_snapshot_ = this->create_service<std_srvs::srv::Trigger>(
+            "~/snapshot",
+            [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+                   std::shared_ptr<std_srvs::srv::Trigger::Response> res) {
+                std::lock_guard<std::mutex> lock(mtx_);
+                if (last_raw_frame_.empty()) {
+                    res->success = false;
+                    res->message = "尚无帧数据";
+                    return;
+                }
+                // 1) 原始帧
+                cv::imwrite("/tmp/snapshot_raw.png", last_raw_frame_);
+                // 2) 标注画面 (含检测框、FPS、状态)
+                if (!last_debug_image_.empty()) {
+                    cv::imwrite("/tmp/snapshot_debug.png", last_debug_image_);
+                }
+                // 3) 诊断分析图 (梯度热力图)
+                cv::Mat diag = buildDiagnosticImage(last_raw_frame_);
+                if (!diag.empty()) {
+                    cv::imwrite("/tmp/snapshot_diag.png", diag);
+                }
+                // 4) 检测结果文本 (等同于 ~/result 话题内容)
+                std::ostringstream oss;
+                oss << "frame: " << last_result_.frame_size.width
+                    << "x" << last_result_.frame_size.height << "\n";
+                oss << "inference_ms: " << last_result_.inference_ms << "\n";
+                oss << "detections: " << last_result_.detections.size() << "\n";
+                for (size_t i = 0; i < last_result_.detections.size(); ++i) {
+                    const auto& d = last_result_.detections[i];
+                    float cx_d = (d.corner_tl.x + d.corner_tr.x + d.corner_br.x + d.corner_bl.x) * 0.25f;
+                    float cy_d = (d.corner_tl.y + d.corner_tr.y + d.corner_br.y + d.corner_bl.y) * 0.25f;
+                    oss << "  [" << i << "] class=" << d.class_name
+                        << " id=" << d.class_id
+                        << " conf=" << d.confidence
+                        << " center=(" << int(cx_d) << "," << int(cy_d) << ")"
+                        << " bbox=" << int(d.corner_br.x - d.corner_tl.x)
+                        << "x" << int(d.corner_br.y - d.corner_tl.y)
+                        << " tl=(" << int(d.corner_tl.x) << "," << int(d.corner_tl.y) << ")"
+                        << " br=(" << int(d.corner_br.x) << "," << int(d.corner_br.y) << ")"
+                        << "\n";
+                }
+                oss << "fps: " << int(fps_) << "\n";
+                {
+                    std::ofstream ofs("/tmp/snapshot_result.txt");
+                    ofs << oss.str();
+                }
+                std::string msg = "OK | /tmp/snapshot_raw.png /tmp/snapshot_debug.png /tmp/snapshot_diag.png /tmp/snapshot_result.txt";
+                res->success = true;
+                res->message = msg;
             });
 
         // ---- 动态参数回调 ----
@@ -271,6 +371,21 @@ private:
         cfg.detectorType             = getParam<std::string>("detector_type");
         cfg.enableWeaponheadDetector = getParam<bool>("enable_weaponhead");
 
+        // weaponhead ROS 参数覆盖 (优先于 YAML)
+        cfg.weaponhead.blurKernel    = getParam<int>("wh_blur_kernel");
+        cfg.weaponhead.gradRatio     = getParam<float>("wh_grad_ratio");
+        cfg.weaponhead.searchBandV   = getParam<int>("wh_search_band_v");
+        cfg.weaponhead.minWidth      = getParam<int>("wh_min_width");
+        cfg.weaponhead.maxWidth      = getParam<int>("wh_max_width");
+        cfg.weaponhead.darkMaxGray   = getParam<int>("wh_dark_max_gray");
+        cfg.weaponhead.contrastRatio = getParam<float>("wh_contrast_ratio");
+        cfg.weaponhead.minHeight     = getParam<int>("wh_min_height");
+        cfg.weaponhead.maxDrift      = getParam<int>("wh_max_drift");
+        cfg.weaponhead.blobGrayThr   = getParam<int>("wh_blob_gray_thr");
+        cfg.weaponhead.blobMinArea   = getParam<int>("wh_blob_min_area");
+        cfg.weaponhead.blobMaxSat    = getParam<float>("wh_blob_max_sat");
+        cfg.weaponhead.blobSolidity  = getParam<float>("wh_blob_solidity");
+
         // 类别名解析
         auto clsStr = getParam<std::string>("class_names");
         cfg.model.classNames.clear();
@@ -311,7 +426,21 @@ private:
         yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
         // weaponhead_detector 松耦合附加 (与 YOLO 并行, 检测不同目标)
         if (cfg_.enableWeaponheadDetector || cfg_.detectorType == "weaponhead_detector") {
-            wh_detector_ = std::make_unique<WeaponheadDetector>();
+            WeaponheadDetector::Params whParams;
+            whParams.blurKernel    = cfg_.weaponhead.blurKernel;
+            whParams.gradRatio     = cfg_.weaponhead.gradRatio;
+            whParams.searchBandV   = cfg_.weaponhead.searchBandV;
+            whParams.minWidth      = cfg_.weaponhead.minWidth;
+            whParams.maxWidth      = cfg_.weaponhead.maxWidth;
+            whParams.darkMaxGray   = cfg_.weaponhead.darkMaxGray;
+            whParams.contrastRatio = cfg_.weaponhead.contrastRatio;
+            whParams.minHeight     = cfg_.weaponhead.minHeight;
+            whParams.maxDrift      = cfg_.weaponhead.maxDrift;
+            whParams.blobGrayThr  = cfg_.weaponhead.blobGrayThr;
+            whParams.blobMinArea  = cfg_.weaponhead.blobMinArea;
+            whParams.blobMaxSat   = cfg_.weaponhead.blobMaxSat;
+            whParams.blobMinSolidity = cfg_.weaponhead.blobSolidity;
+            wh_detector_ = std::make_unique<WeaponheadDetector>(whParams);
         }
 
         RCLCPP_INFO(this->get_logger(),
@@ -343,7 +472,8 @@ private:
                 n == "usb_height" || n == "usb_fps" || n == "usb_fourcc") {
                 needRebuildCamera = true;
             }
-            if (n == "detector_type" || n == "enable_weaponhead" || n == "config_path") {
+            if (n == "detector_type" || n == "enable_weaponhead" || n == "config_path" ||
+                n.rfind("wh_", 0) == 0) {
                 needRebuildDetector = true;
             }
             if (n == "inference_enabled") {
@@ -383,7 +513,21 @@ private:
             try {
                 yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
                 if (cfg_.enableWeaponheadDetector || cfg_.detectorType == "weaponhead_detector") {
-                    wh_detector_ = std::make_unique<WeaponheadDetector>();
+                    WeaponheadDetector::Params whParams;
+                    whParams.blurKernel    = cfg_.weaponhead.blurKernel;
+                    whParams.gradRatio     = cfg_.weaponhead.gradRatio;
+                    whParams.searchBandV   = cfg_.weaponhead.searchBandV;
+                    whParams.minWidth      = cfg_.weaponhead.minWidth;
+                    whParams.maxWidth      = cfg_.weaponhead.maxWidth;
+                    whParams.darkMaxGray   = cfg_.weaponhead.darkMaxGray;
+                    whParams.contrastRatio = cfg_.weaponhead.contrastRatio;
+                    whParams.minHeight     = cfg_.weaponhead.minHeight;
+                    whParams.maxDrift      = cfg_.weaponhead.maxDrift;
+                    whParams.blobGrayThr  = cfg_.weaponhead.blobGrayThr;
+                    whParams.blobMinArea  = cfg_.weaponhead.blobMinArea;
+                    whParams.blobMaxSat   = cfg_.weaponhead.blobMaxSat;
+                    whParams.blobMinSolidity = cfg_.weaponhead.blobSolidity;
+                    wh_detector_ = std::make_unique<WeaponheadDetector>(whParams);
                 }
                 RCLCPP_INFO(this->get_logger(),
                             "检测器已重载 | wh:%s | conf:%.2f iou:%.2f cuda:%d",
@@ -410,6 +554,8 @@ private:
         if (!camera_ || !camera_->getFrame(frame) || frame.empty())
             return;
 
+        last_raw_frame_ = frame.clone();  // 留底供 snapshot 服务使用
+
         bool shouldInfer = inference_enabled_.load();
         bool singleShot  = trigger_single_shot_.exchange(false);
         bool pubDebug    = getParam<bool>("debug_image") &&
@@ -425,7 +571,7 @@ private:
             }
             if (wh_detector_) {
                 auto wh_res = wh_detector_->detect(frame);
-                // 松耦合: weaponhead 结果追加到 YOLO 结果中 (不同目标, e.g. OBJ)
+                // 松耦合: weaponhead 结果追加到 YOLO 结果中 (不同目标, e.g. WEAPONHEAD)
                 for (auto& d : wh_res.detections) {
                     result.detections.push_back(std::move(d));
                 }
@@ -443,9 +589,33 @@ private:
             publishResults(result);
         }
 
+        last_result_ = result;  // 缓存供 snapshot 使用
+
+        // FPS 计算 (每秒平滑更新)
+        {
+            double fps = frameCount_ > 0
+                ? frameCount_ / std::chrono::duration<double>(
+                      std::chrono::steady_clock::now() - lastFpsTime_).count()
+                : 0.0;
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<double>(now - lastFpsTime_).count() >= 1.0) {
+                fps_ = fps;
+                lastFpsTime_ = now;
+                frameCount_ = 0;
+            }
+        }
+
         // 发布 debug 画面 (有订阅者时才绘制, 节省 CPU)
-        if (pubDebug) {
-            publishDebugImage(frame, result, shouldInfer);
+        {
+            auto disp = drawDetections(frame, result, fps_, shouldInfer);
+            last_debug_image_ = disp.clone();  // 缓存供 snapshot 使用
+            if (pubDebug) {
+                auto imgMsg = cv_bridge::CvImage(
+                    std_msgs::msg::Header(), "bgr8", disp).toImageMsg();
+                imgMsg->header.stamp    = this->now();
+                imgMsg->header.frame_id = cfg_.cameraType + "_camera";
+                pub_debug_->publish(*imgMsg);
+            }
         }
 
         // 状态 (每 30 帧)
@@ -497,28 +667,165 @@ private:
     }
 
     // ----------------------------------------------------------
-    // 发布 debug 画面
+    // 诊断用图像: 2x3 六面板 (Gray | Blur | DarkMask | Grad | Pass | Laplacian)
     // ----------------------------------------------------------
-    void publishDebugImage(const cv::Mat& frame, const FrameResult& result,
-                           bool inferActive) {
-        double fps = frameCount_ > 0
-            ? frameCount_ / std::chrono::duration<double>(
-                  std::chrono::steady_clock::now() - lastFpsTime_).count()
-            : 0.0;
+    cv::Mat buildDiagnosticImage(const cv::Mat& frame) {
+        if (frame.empty()) return {};
 
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration<double>(now - lastFpsTime_).count() >= 1.0) {
-            fps_ = fps;
-            lastFpsTime_ = now;
+        cv::Mat gray, gray3;
+        if (frame.channels() == 3) {
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(gray, gray3, cv::COLOR_GRAY2BGR);
+        } else {
+            gray = frame.clone();
+            cv::cvtColor(gray, gray3, cv::COLOR_GRAY2BGR);
         }
 
-        auto disp = drawDetections(frame, result, fps_, inferActive);
+        const int w = gray.cols, h = gray.rows, cx = w / 2, cy = h / 2;
 
-        auto imgMsg = cv_bridge::CvImage(
-            std_msgs::msg::Header(), "bgr8", disp).toImageMsg();
-        imgMsg->header.stamp    = this->now();
-        imgMsg->header.frame_id = cfg_.cameraType + "_camera";
-        pub_debug_->publish(*imgMsg);
+        // 1) 模糊
+        cv::Mat blurred;
+        cv::GaussianBlur(gray, blurred, cv::Size(21, 21), 0);
+        cv::Mat blur3; cv::cvtColor(blurred, blur3, cv::COLOR_GRAY2BGR);
+
+        // 2) 暗部 mask (< 50, 同算法)
+        cv::Mat darkMask, darkColor;
+        cv::threshold(gray, darkMask, 50, 255, cv::THRESH_BINARY_INV);
+        cv::applyColorMap(darkMask, darkColor, cv::COLORMAP_HOT);
+
+        // 3) 逐行梯度 → Pass/Fail 图 (搜索带)
+        int vBand = 140;
+        int vTop = std::max(0, cy - vBand);
+        int vBot = std::min(h - 1, cy + vBand);
+        int vH = vBot - vTop + 1;
+
+        cv::Mat bandF, bandSm, grad;
+        blurred(cv::Range(vTop, vBot + 1), cv::Range::all()).convertTo(bandF, CV_32F);
+        cv::GaussianBlur(bandF, bandSm, cv::Size(9, 1), 0);
+
+        grad = cv::Mat::zeros(vH, w, CV_32F);
+        for (int x = 1; x < w - 1; ++x) {
+            cv::Mat d; cv::absdiff(bandSm.col(x + 1), bandSm.col(x - 1), d);
+            d.copyTo(grad.col(x)); grad.col(x) *= 0.5f;
+        }
+        cv::GaussianBlur(grad, grad, cv::Size(21, 1), 0);
+
+        // 全局梯度热力图
+        double globalGmax;
+        cv::minMaxLoc(grad, nullptr, &globalGmax);
+        cv::Mat gradColor;
+        grad.convertTo(gradColor, CV_8UC1, globalGmax > 0 ? 255.0 / globalGmax : 1.0);
+        cv::applyColorMap(gradColor, gradColor, cv::COLORMAP_INFERNO);
+
+        // 逐行扫描 Pass/Fail
+        cv::Mat passMap = cv::Mat::zeros(vH, w, CV_8UC3);
+        cv::Mat grayF; gray.convertTo(grayF, CV_32F);
+        int passCount = 0;
+
+        for (int yi = 0; yi < vH; ++yi) {
+            int yAbs = vTop + yi;
+            double gmin, gmax;
+            cv::minMaxLoc(grad.row(yi), &gmin, &gmax);
+            if (gmax < 1.5) continue;
+            float gthresh = std::max(2.0f, float(gmax) * 0.35f);
+
+            const float* gptr = grad.ptr<float>(yi);
+            int left = 0, right = w - 1;
+            for (int x = cx; x >= 0; --x)   { if (gptr[x] > gthresh) { left = x; break; } }
+            for (int x = cx; x < w; ++x)    { if (gptr[x] > gthresh) { right = x; break; } }
+
+            int rw = right - left;
+            if (rw < 16 || rw > 300) continue;
+            if (left == 0 || right == w - 1) continue;
+
+            cv::Scalar rm = cv::mean(grayF.row(yAbs).colRange(left, right));
+            if (rm[0] > 100) continue;
+
+            float outL = float(cv::mean(grayF.row(yAbs).colRange(std::max(0,left-12), left))[0]);
+            float inL  = float(cv::mean(grayF.row(yAbs).colRange(left, std::min(left+12, right)))[0]);
+            float outR = float(cv::mean(grayF.row(yAbs).colRange(right, std::min(w,right+12)))[0]);
+            float inR  = float(cv::mean(grayF.row(yAbs).colRange(std::max(left,right-12), right))[0]);
+            bool lc = (inL > 0) ? (outL / inL) >= 1.15f : (outL > 20);
+            bool rc = (inR > 0) ? (outR / inR) >= 1.15f : (outR > 20);
+            if (!lc && !rc) continue;
+
+            cv::line(passMap, {left, yi}, {right, yi}, {0, 255, 0}, 1);
+            cv::circle(passMap, {left, yi}, 1, {255, 0, 0}, -1);
+            cv::circle(passMap, {right, yi}, 1, {0, 0, 255}, -1);
+            passCount++;
+        }
+
+        // 4) Blob 检测可视化
+        cv::Mat blobVis = cv::Mat::zeros(h, w, CV_8UC3);
+        {
+            cv::Mat mask50;
+            cv::threshold(gray, mask50, 50, 255, cv::THRESH_BINARY_INV);
+            cv::Mat maskCopy = mask50.clone();
+            std::vector<std::vector<cv::Point>> contours;
+            cv::findContours(maskCopy, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            for (const auto& cnt : contours) {
+                double area = cv::contourArea(cnt);
+                if (area < 500) continue;
+                std::vector<cv::Point> hull;
+                cv::convexHull(cnt, hull);
+                double hullArea = cv::contourArea(hull);
+                float solidity = (hullArea > 0) ? float(area / hullArea) : 0;
+                cv::Rect box = cv::boundingRect(cnt);
+                cv::Mat roiM = mask50(box);
+                cv::Mat roiH; cv::cvtColor(frame(box), roiH, cv::COLOR_BGR2HSV);
+                float s = float(cv::mean(roiH, roiM)[1]);
+                cv::Scalar col = (solidity >= 0.80f && s <= 80.0f) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
+                cv::drawContours(blobVis, std::vector<std::vector<cv::Point>>{cnt}, -1, col, 2);
+                cv::rectangle(blobVis, box, col, 1);
+            }
+        }
+
+        // ── 拼图: 2 行 × 3 列 ──
+        int pad = 10, labelH = 20;
+        int cellW = w, cellH = h;
+        int totalW = cellW * 3 + pad * 4;
+        int totalH = labelH + cellH + pad + labelH + cellH + pad;
+        cv::Mat board(totalH, totalW, CV_8UC3, cv::Scalar(30, 30, 30));
+
+        auto putLabel = [&](int x, int y, const std::string& t, cv::Scalar c = {200, 200, 200}) {
+            cv::putText(board, t, {x, y + 15}, cv::FONT_HERSHEY_SIMPLEX, 0.5, c, 1);
+        };
+        auto drawCenter = [&](int x, int y) {
+            cv::line(board, {x + cx, y}, {x + cx, y + cellH - 1}, {0, 255, 255}, 1);
+        };
+
+        // Row0
+        int r0y = pad;
+        int c0x = pad, c1x = pad * 2 + cellW, c2x = pad * 3 + cellW * 2;
+
+        putLabel(c0x, r0y, "1. Gray"); gray3.copyTo(board(cv::Rect(c0x, r0y + labelH, cellW, cellH))); drawCenter(c0x, r0y + labelH);
+        putLabel(c1x, r0y, "2. Blurred k=21"); blur3.copyTo(board(cv::Rect(c1x, r0y + labelH, cellW, cellH)));
+        putLabel(c2x, r0y, "3. Dark mask (thr=50)"); darkColor.copyTo(board(cv::Rect(c2x, r0y + labelH, cellW, cellH)));
+
+        // Row1
+        int r1y = r0y + labelH + cellH + pad;
+        putLabel(c0x, r1y, "4. |Gradient| (max=" + std::to_string(int(globalGmax)) + ")");
+        gradColor.copyTo(board(cv::Rect(c0x, r1y + labelH, cellW, vH)));
+
+        putLabel(c1x, r1y, "5. Pass rows (green=pass, " + std::to_string(passCount) + " rows)");
+        passMap.copyTo(board(cv::Rect(c1x, r1y + labelH, cellW, vH)));
+
+        putLabel(c2x, r1y, "6. Blob (green=valid, red=reject)");
+        blobVis.copyTo(board(cv::Rect(c2x, r1y + labelH, cellW, cellH)));
+
+        // 如果最后有检测结果, 叠加到 panel 1/2/3
+        if (!last_result_.detections.empty()) {
+            for (const auto& d : last_result_.detections) {
+                int l = int(d.corner_tl.x), t = int(d.corner_tl.y);
+                int r = int(d.corner_br.x), b = int(d.corner_br.y);
+                cv::Scalar col = (d.class_name == "WEAPONHEAD") ? cv::Scalar(0, 255, 255) : cv::Scalar(255, 0, 0);
+                cv::rectangle(board, {c0x + l, r0y + labelH + t}, {c0x + r, r0y + labelH + b}, col, 2);
+                cv::rectangle(board, {c1x + l, r0y + labelH + t}, {c1x + r, r0y + labelH + b}, col, 2);
+                cv::rectangle(board, {c2x + l, r0y + labelH + t}, {c2x + r, r0y + labelH + b}, col, 2);
+            }
+        }
+
+        return board;
     }
 
     // ----------------------------------------------------------
@@ -545,6 +852,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr      sub_enable_;
     rclcpp::Service<kfs_core::srv::SetInferState>::SharedPtr  srv_set_state_;
     rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        srv_trigger_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr        srv_snapshot_;
     rclcpp::TimerBase::SharedPtr                              timer_;
     OnSetParametersCallbackHandle::SharedPtr                  param_cb_handle_;
 
@@ -554,6 +862,9 @@ private:
     int                  frameCount_  = 0;
     double               fps_         = 0.0;
     std::chrono::steady_clock::time_point lastFpsTime_{std::chrono::steady_clock::now()};
+    cv::Mat              last_raw_frame_;
+    cv::Mat              last_debug_image_;
+    FrameResult          last_result_;
     std::mutex           mtx_;
 };
 

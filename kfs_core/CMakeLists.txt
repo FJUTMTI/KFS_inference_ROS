@@ -45,7 +45,7 @@ find_package(yaml-cpp REQUIRED)
 
 # --- OpenCV ---
 # 必须使用系统 OpenCV 4.5d (与 ROS2 cv_bridge 一致), 避免 ABI 冲突
-find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui videoio calib3d
     PATHS /usr/lib/x86_64-linux-gnu/cmake/opencv4
           /lib/x86_64-linux-gnu/cmake/opencv4
     NO_DEFAULT_PATH)

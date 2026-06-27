@@ -55,6 +55,8 @@ Config loadConfig(const std::string& yamlPath) {
             cfg.usb.height = yamlInt(usb, "height", cfg.usb.height);
             cfg.usb.fps    = yamlInt(usb, "fps",    cfg.usb.fps);
             cfg.usb.fourcc = yamlStr(usb, "fourcc", cfg.usb.fourcc);
+            cfg.usb.calibration_file = yamlStr(usb, "calibration_file", cfg.usb.calibration_file);
+            cfg.usb.undistort = yamlBool(usb, "undistort", cfg.usb.undistort);
         }
 
         if (cam["controls"]) {

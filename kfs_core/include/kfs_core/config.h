@@ -17,6 +17,8 @@ struct USBConfig {
     int         height = 1024;
     int         fps    = 30;
     std::string fourcc = "";       // "MJPG", "YUYV", 或空(自动)
+    std::string calibration_file = "";  // e.g. "config/ost.yaml" (ROS ost.yaml / camera_info yaml 格式)
+    bool        undistort = false;      // 是否对 getFrame() 返回的图像做畸变矫正 (需要 calibration_file)
 };
 
 /// V4L2 控制参数 (值 < 0 表示不设置)

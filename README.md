@@ -164,6 +164,8 @@ camera:
     height: 480
     fps: 60
     fourcc: "MJPG"
+    calibration_file: "kfs_core/config/ost.yaml"  # 可选，标定后生成
+    undistort: false                            # 是否对捕获帧做畸变矫正预处理 (见下方说明)
   controls:
     auto_exposure: 0
     brightness: 0
@@ -186,6 +188,56 @@ detector:
   type: yolo
   enable_weaponhead: false   # 启用后与 YOLO 并行 (weaponhead_detector 传统 CV)
 ```
+
+## 相机标定 (USB 摄像头)
+
+本项目支持使用 ROS2 `camera_calibration` 对 USB 摄像头进行张正友标定，生成 `ost.yaml` 供运行时加载真实内参 (fx/fy/cx/cy)。
+
+### 准备标定视频
+
+- 准备 11x8 棋盘格标定板 (interior corners 11x8，即 12x9 方格)，方格边长例如 20mm。
+- 录制视频时缓慢平移/旋转/倾斜标定板，覆盖画面不同区域和距离。示例视频已放在 `kfs_core/assets/calib.mp4`。
+
+### 执行标定
+
+使用仓库提供的脚本 (内部调用 ROS2 camera_calibration 的 MonoCalibrator)：
+
+```bash
+cd /home/lee/realsense_inference
+
+python3 kfs_core/scripts/calibrate_camera.py \
+  --video kfs_core/assets/calib.mp4 \
+  --size 11x8 \
+  --square 0.02 \
+  --output kfs_core/config/ost.yaml \
+  --scale 1.0 \
+  --sample-every 10 \
+  --max-samples 20
+```
+
+- `--square` : 方格物理尺寸 (米)，根据你的标定板修改 (20mm=0.02)。
+- 默认以视频原生分辨率 (本例 1920×1080) 处理并输出 ost.yaml；如需更快可加 `--scale 0.5`（结果会按比例对应较低分辨率，运行时仍自动缩放内参）。
+- 输出 `ost.yaml` 即标准 ROS 格式，包含 camera_matrix / distortion / projection 等。
+
+标定完成后，`kfs_core/config/kfs_config.yaml` 默认已指向它：
+
+```yaml
+camera:
+  usb:
+    ...
+    calibration_file: "kfs_core/config/ost.yaml"
+    undistort: true          # 启用畸变矫正预处理 (推荐用于视觉任务)
+```
+
+USB 捕获器启动时会加载标定并打印 `[USB] 已加载相机标定...`。
+
+如果 `undistort: true`，每次 `getFrame()` 会自动用 `cv::initUndistortRectifyMap` + `remap` 做畸变矫正，返回无畸变图像（同时内部会把返回的内参更新为 getOptimalNewCameraMatrix 后的新 K）。
+
+注意：YOLO / weaponhead_detector 模型通常在带畸变的原始画面上训练/调参，开启 undistort 后可能需要重新验证检测效果。推荐先设 false 跑 baseline，再打开 true 对比。
+
+脚本默认 `--scale 1.0`（原生）。如果标定视频很大，可用 `--scale 0.5 --sample-every 5` 加速。
+
+当前 ost.yaml 已基于 calib.mp4 的 1920×1080 原生分辨率生成。
 
 ---
 

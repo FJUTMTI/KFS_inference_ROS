@@ -24,7 +24,9 @@ std::unique_ptr<ICameraCapture> CameraFactory::create(const Config& cfg) {
         auto cam = std::make_unique<USBCapture>(
             cfg.usb.device,
             cfg.usb.width, cfg.usb.height, cfg.usb.fps,
-            cfg.usb.fourcc);
+            cfg.usb.fourcc,
+            cfg.usb.calibration_file,
+            cfg.usb.undistort);
         cam->applyControls(ctrl);
         return cam;
     }

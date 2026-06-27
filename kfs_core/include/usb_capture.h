@@ -44,12 +44,16 @@ public:
      * @param height    期望分辨率高 (默认 1080)
      * @param fps       期望帧率 (默认 30)
      * @param fourcc    编码格式, "MJPG" 或 "" (自动), 推荐 MJPG 获得高帧率
+     * @param calibration_file  ost.yaml 或 camera_info yaml 路径 (可选，用于加载真实 fx/fy/cx/cy)
+     * @param undistort         是否对获取到的帧自动做畸变矫正 (需要有效的 calibration_file)
      */
     USBCapture(int deviceId = 0,
                int width    = 1920,
                int height   = 1080,
                int fps      = 30,
-               const std::string& fourcc = "");
+               const std::string& fourcc = "",
+               const std::string& calibration_file = "",
+               bool undistort = false);
 
     ~USBCapture() override;
 

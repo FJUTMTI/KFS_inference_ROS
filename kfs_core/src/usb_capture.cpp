@@ -1,8 +1,11 @@
 #include "usb_capture.h"
 #include <opencv2/videoio.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/calib3d.hpp>
 #include <iostream>
 #include <dirent.h>
+#include <yaml-cpp/yaml.h>
+#include <fstream>
 
 struct USBCapture::Impl {
     int  deviceId, requestW, requestH, requestFPS;
@@ -11,14 +14,126 @@ struct USBCapture::Impl {
     bool running = false;
     CameraControls pendingCtrls;
     cv::VideoCapture cap;
+    std::string calibrationFile;
+    kfs::CameraIntrinsics calibratedIntrinsics;  // loaded if calibration_file valid
+    bool intrinsicsLoaded = false;
+    bool doUndistort = false;
+    std::vector<double> distortionCoeffs;        // k1,k2,p1,p2,k3,... (up to 8 for rational)
+    cv::Mat undistMap1, undistMap2;
+    bool mapsReady = false;
 
-    Impl(int devId, int w, int h, int f, const std::string& fourcc)
-        : deviceId(devId), requestW(w), requestH(h), requestFPS(f) {
+    Impl(int devId, int w, int h, int f, const std::string& fourcc, const std::string& calib_file, bool undist)
+        : deviceId(devId), requestW(w), requestH(h), requestFPS(f), calibrationFile(calib_file), doUndistort(undist) {
         if (fourcc == "MJPG" || fourcc == "mjpg")
             fourccCode = cv::VideoWriter::fourcc('M','J','P','G');
         else if (fourcc == "YUYV" || fourcc == "yuyv")
             fourccCode = cv::VideoWriter::fourcc('Y','U','Y','V');
         else fourccCode = -1;
+        loadCalibration();
+    }
+
+    void loadCalibration() {
+        if (calibrationFile.empty() || intrinsicsLoaded) return;
+        try {
+            YAML::Node root = YAML::LoadFile(calibrationFile);
+            // ROS ost.yaml or camera_info.yaml style
+            if (root["camera_matrix"] && root["camera_matrix"]["data"]) {
+                auto data = root["camera_matrix"]["data"];
+                if (data.IsSequence() && data.size() >= 9) {
+                    float fx = data[0].as<float>();
+                    float fy = data[4].as<float>();
+                    float cx = data[2].as<float>();
+                    float cy = data[5].as<float>();
+                    calibratedIntrinsics.fx = fx;
+                    calibratedIntrinsics.fy = fy;
+                    calibratedIntrinsics.cx = cx;
+                    calibratedIntrinsics.cy = cy;
+                    if (root["image_width"]) calibratedIntrinsics.width = root["image_width"].as<int>();
+                    if (root["image_height"]) calibratedIntrinsics.height = root["image_height"].as<int>();
+                    intrinsicsLoaded = true;
+                    std::cout << "[USB] 已加载相机标定: " << calibrationFile
+                              << " fx=" << fx << " fy=" << fy << " cx=" << cx << " cy=" << cy << std::endl;
+                }
+            }
+            // Fallback: some yaml use top level K: [..] or camera_matrix as flat
+            if (!intrinsicsLoaded && root["K"] && root["K"].IsSequence() && root["K"].size() >= 9) {
+                YAML::Node k = root["K"];
+                calibratedIntrinsics.fx = k[0].as<float>();
+                calibratedIntrinsics.fy = k[4].as<float>();
+                calibratedIntrinsics.cx = k[2].as<float>();
+                calibratedIntrinsics.cy = k[5].as<float>();
+                intrinsicsLoaded = true;
+                std::cout << "[USB] 已加载相机标定(K): " << calibrationFile << std::endl;
+            }
+
+            // Load distortion coefficients (supports plumb_bob 5 or rational 8)
+            YAML::Node distNode;
+            if (root["distortion_coefficients"] && root["distortion_coefficients"]["data"])
+                distNode = root["distortion_coefficients"]["data"];
+            else if (root["D"] && root["D"].IsSequence())
+                distNode = root["D"];
+            else if (root["distortion"] && root["distortion"].IsSequence())
+                distNode = root["distortion"];
+
+            if (distNode && distNode.IsSequence() && distNode.size() >= 4) {
+                distortionCoeffs.clear();
+                for (std::size_t i = 0; i < distNode.size(); ++i) {
+                    distortionCoeffs.push_back(distNode[i].as<double>());
+                }
+                // Trim trailing zeros for common 5-coeff case
+                while (distortionCoeffs.size() > 5 && distortionCoeffs.back() == 0.0)
+                    distortionCoeffs.pop_back();
+            }
+
+            if (!distortionCoeffs.empty() && intrinsicsLoaded) {
+                std::cout << "[USB] 畸变系数已加载 (" << distortionCoeffs.size() << " 个)\n";
+            }
+        } catch (const std::exception& e) {
+            std::cout << "[USB] 标定文件加载失败 '" << calibrationFile << "': " << e.what() << " (回退默认内参)\n";
+        }
+    }
+
+    void initUndistortMaps() {
+        if (!doUndistort || !intrinsicsLoaded || mapsReady || distortionCoeffs.empty()) return;
+
+        int w = realWidth > 0 ? realWidth : requestW;
+        int h = realHeight > 0 ? realHeight : requestH;
+        if (w <= 0 || h <= 0) return;
+
+        // Use the (possibly already scaled in getIntrinsics logic) current intrinsics
+        kfs::CameraIntrinsics cur = calibratedIntrinsics;
+        if (cur.width <= 0) cur.width = w;
+        if (cur.height <= 0) cur.height = h;
+
+        cv::Mat K = (cv::Mat_<double>(3,3) <<
+            cur.fx, 0, cur.cx,
+            0, cur.fy, cur.cy,
+            0, 0, 1);
+
+        int dsize = (int)distortionCoeffs.size();
+        cv::Mat D(1, dsize, CV_64F);
+        for (int i = 0; i < dsize; ++i) {
+            D.at<double>(0, i) = distortionCoeffs[i];
+        }
+
+        // Compute optimal new camera matrix (alpha=0 keeps all pixels valid, smaller FOV)
+        cv::Mat newK = cv::getOptimalNewCameraMatrix(K, D, cv::Size(w, h), 0.0);
+
+        cv::initUndistortRectifyMap(K, D, cv::Mat(), newK, cv::Size(w, h),
+                                    CV_32FC1, undistMap1, undistMap2);
+
+        mapsReady = !undistMap1.empty() && !undistMap2.empty();
+        if (mapsReady) {
+            // Update returned intrinsics to the new (undistorted) camera matrix for consistency
+            calibratedIntrinsics.fx = static_cast<float>(newK.at<double>(0,0));
+            calibratedIntrinsics.fy = static_cast<float>(newK.at<double>(1,1));
+            calibratedIntrinsics.cx = static_cast<float>(newK.at<double>(0,2));
+            calibratedIntrinsics.cy = static_cast<float>(newK.at<double>(1,2));
+            calibratedIntrinsics.width = w;
+            calibratedIntrinsics.height = h;
+
+            std::cout << "[USB] 畸变矫正地图已初始化 (" << w << "x" << h << ")\n";
+        }
     }
 
     bool start() {
@@ -60,6 +175,9 @@ struct USBCapture::Impl {
         if (realHeight <= 0) realHeight = requestH;
         if (realFPS    <= 0) realFPS    = requestFPS;
 
+        // Prepare undistort maps if requested and we have calibration
+        initUndistortMaps();
+
         int af = static_cast<int>(cap.get(cv::CAP_PROP_FOURCC));
         char a=(char)(af&0xFF),b=(char)((af>>8)&0xFF),c=(char)((af>>16)&0xFF),d=(char)((af>>24)&0xFF);
         std::string cc{a,b,c,d};
@@ -79,12 +197,19 @@ struct USBCapture::Impl {
     }
 
     bool getFrame(cv::Mat& f) {
-        return running && cap.read(f);
+        if (!running || !cap.read(f)) return false;
+
+        if (doUndistort && mapsReady && !undistMap1.empty() && !undistMap2.empty()) {
+            cv::Mat undistorted;
+            cv::remap(f, undistorted, undistMap1, undistMap2, cv::INTER_LINEAR);
+            f = undistorted;
+        }
+        return true;
     }
 };
 
-USBCapture::USBCapture(int d,int w,int h,int fps,const std::string& fc)
-    : pImpl(std::make_unique<Impl>(d,w,h,fps,fc)) {}
+USBCapture::USBCapture(int d,int w,int h,int fps,const std::string& fc, const std::string& calib, bool undist)
+    : pImpl(std::make_unique<Impl>(d,w,h,fps,fc,calib,undist)) {}
 USBCapture::~USBCapture(){pImpl->stop();}
 bool USBCapture::start(){return pImpl->start();}
 void USBCapture::stop(){pImpl->stop();}
@@ -96,6 +221,26 @@ int USBCapture::getFPS()const{return pImpl->realFPS;}
 int USBCapture::getDeviceId()const{return pImpl->deviceId;}
 void USBCapture::applyControls(const CameraControls& c){pImpl->pendingCtrls=c;}
 kfs::CameraIntrinsics USBCapture::getIntrinsics()const{
+    if (pImpl->intrinsicsLoaded) {
+        kfs::CameraIntrinsics in = pImpl->calibratedIntrinsics;
+        int lw = in.width > 0 ? in.width : pImpl->requestW;
+        int lh = in.height > 0 ? in.height : pImpl->requestH;
+        int rw = pImpl->realWidth > 0 ? pImpl->realWidth : pImpl->requestW;
+        int rh = pImpl->realHeight > 0 ? pImpl->realHeight : pImpl->requestH;
+        if (lw > 0 && lh > 0 && rw > 0 && rh > 0 && (lw != rw || lh != rh)) {
+            // Scale intrinsics from calib resolution to actual running resolution
+            float sx = static_cast<float>(rw) / static_cast<float>(lw);
+            float sy = static_cast<float>(rh) / static_cast<float>(lh);
+            in.fx *= sx;
+            in.fy *= sy;
+            in.cx *= sx;
+            in.cy *= sy;
+        }
+        // Always report the intrinsics for the resolution we are actually running at
+        in.width = rw;
+        in.height = rh;
+        return in;
+    }
     kfs::CameraIntrinsics in{}; in.width=pImpl->realWidth; in.height=pImpl->realHeight;
     in.fx=in.cx=(float)pImpl->realWidth*.5f; in.fy=in.cy=(float)pImpl->realHeight*.5f;
     return in;

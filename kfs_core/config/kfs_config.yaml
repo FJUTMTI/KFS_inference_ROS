@@ -5,10 +5,12 @@ camera:
   type: usb
   usb:
     device: 0
-    width: 640
-    height: 480
-    fps: 60
+    width: 1920
+    height: 1080
+    fps: 30
     fourcc: "MJPG"
+    calibration_file: "kfs_core/config/ost.yaml"  # 由 scripts/calibrate_camera.py 生成 (ost.yaml 格式, 对应视频原生 1920x1080)
+    undistort: true                             # 设为 true 可启用畸变矫正预处理（对 getFrame 返回的图像做 remap）。注意：检测模型若在带畸变图像上训练，开启后可能影响精度，建议对比测试。
   controls:
     auto_exposure: 0      # 0=自动曝光(V4L2:Aperture Priority), 1=手动
     exposure: -1          # 手动曝光值 (仅 manual 模式)

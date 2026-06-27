@@ -18,3 +18,8 @@ log/
 
 # Python
 __pycache__/
+
+#dataset
+kfs_core/assets/yolo_dataset/
+kfs_core/assets/yolo_dataset_yolo/
+kfs_core/assets/runs

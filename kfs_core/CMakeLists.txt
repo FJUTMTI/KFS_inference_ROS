@@ -111,7 +111,6 @@ set(KFS_CORE_SOURCES
     src/usb_capture.cpp
     src/config.cpp
     src/camera_factory.cpp
-    src/weaponhead_detector.cpp
 )
 
 set(KFS_CORE_HEADERS
@@ -120,7 +119,6 @@ set(KFS_CORE_HEADERS
     include/kfs_core/icamera_capture.h
     include/kfs_core/config.h
     include/kfs_core/camera_factory.h
-    include/weaponhead_detector.h
 )
 
 if(realsense2_FOUND)

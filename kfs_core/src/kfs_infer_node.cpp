@@ -44,7 +44,6 @@
 #include "kfs_core/camera_factory.h"
 #include "kfs_core/icamera_capture.h"
 #include "yolo_detector.h"
-#include "weaponhead_detector.h"
 
 // ROS2
 #include <rclcpp/rclcpp.hpp>
@@ -201,7 +200,7 @@ public:
         declareParam<float>      ("iou_threshold",       seed_loaded ? seed_cfg.model.iouThresh : 0.30f, 0.0f, 1.0f);
         declareParam<bool>       ("use_cuda",            seed_loaded ? seed_cfg.model.useCUDA : true);
         declareParam<std::string>("model_path",          seed_loaded ? seed_cfg.model.path : model_default);
-        declareParam<std::string>("camera_type",         seed_loaded ? seed_cfg.cameraType : "usb");
+        declareParam<std::string>("camera_type",         "");  // 空=跟随YAML, 非空=覆盖YAML
         declareParam<int>        ("usb_device",          seed_loaded ? seed_cfg.usb.device : 0, 0, 63);
         declareParam<int>        ("usb_width",           seed_loaded ? seed_cfg.usb.width : 640, 160, 3840);
         declareParam<int>        ("usb_height",          seed_loaded ? seed_cfg.usb.height : 480, 120, 2160);
@@ -216,20 +215,8 @@ public:
         declareParam<std::string>("detector_type",       seed_loaded ? seed_cfg.detectorType : "yolo");  // "yolo" | "weaponhead_detector"
         declareParam<bool>       ("enable_weaponhead",   seed_loaded ? seed_cfg.enableWeaponheadDetector : true);   // 与 YOLO 并行启用 weaponhead_detector (CV 虚焦左右边界)
 
-        // weaponhead_detector 参数 (动态调节)
-        declareParam<int>        ("wh_blur_kernel",      seed_loaded ? seed_cfg.weaponhead.blurKernel : 21,   3, 51);
-        declareParam<float>      ("wh_grad_ratio",       seed_loaded ? seed_cfg.weaponhead.gradRatio : 0.35f, 0.05f, 0.95f);
-        declareParam<int>        ("wh_search_band_v",    seed_loaded ? seed_cfg.weaponhead.searchBandV : 140,  20, 240);
-        declareParam<int>        ("wh_min_width",        seed_loaded ? seed_cfg.weaponhead.minWidth : 16,   4,  100);
-        declareParam<int>        ("wh_max_width",        seed_loaded ? seed_cfg.weaponhead.maxWidth : 300,  30, 640);
-        declareParam<int>        ("wh_dark_max_gray",    seed_loaded ? seed_cfg.weaponhead.darkMaxGray : 100,   5,  200);
-        declareParam<float>      ("wh_contrast_ratio",   seed_loaded ? seed_cfg.weaponhead.contrastRatio : 1.15f, 1.0f, 10.0f);
-        declareParam<int>        ("wh_min_height",       seed_loaded ? seed_cfg.weaponhead.minHeight : 14,   2,  100);
-        declareParam<int>        ("wh_max_drift",        seed_loaded ? seed_cfg.weaponhead.maxDrift : 35,   2,  80);
-        declareParam<int>        ("wh_blob_gray_thr",    seed_loaded ? seed_cfg.weaponhead.blobGrayThr : 50,   10, 150);
-        declareParam<int>        ("wh_blob_min_area",    seed_loaded ? seed_cfg.weaponhead.blobMinArea : 500,  100, 5000);
-        declareParam<float>      ("wh_blob_max_sat",     seed_loaded ? seed_cfg.weaponhead.blobMaxSat : 80.0f, 0.0f, 255.0f);
-        declareParam<float>      ("wh_blob_solidity",    seed_loaded ? seed_cfg.weaponhead.blobSolidity : 0.80f, 0.50f, 1.0f);
+        // weaponhead YOLO 模型 (与3class并行推理)
+        declareParam<std::string>("wh_model_path",       seed_loaded ? seed_cfg.weaponhead.whModelPath : "");
 
         // 类别名作为 string 列表(逗号分隔), rqt 字符串参数编辑
         {
@@ -400,8 +387,11 @@ private:
             }
         }
 
-        // ROS 参数覆盖 (优先)
-        cfg.cameraType               = getParam<std::string>("camera_type");
+        // ROS 参数覆盖 (优先): 仅当 ROS 参数非空/非默认时才覆盖 YAML
+        {
+            auto camType = getParam<std::string>("camera_type");
+            if (!camType.empty()) cfg.cameraType = camType;
+        }
         cfg.usb.device               = getParam<int>("usb_device");
         cfg.usb.width                = getParam<int>("usb_width");
         cfg.usb.height               = getParam<int>("usb_height");
@@ -422,19 +412,7 @@ private:
         cfg.enableWeaponheadDetector = getParam<bool>("enable_weaponhead");
 
         // weaponhead ROS 参数覆盖 (优先于 YAML)
-        cfg.weaponhead.blurKernel    = getParam<int>("wh_blur_kernel");
-        cfg.weaponhead.gradRatio     = getParam<float>("wh_grad_ratio");
-        cfg.weaponhead.searchBandV   = getParam<int>("wh_search_band_v");
-        cfg.weaponhead.minWidth      = getParam<int>("wh_min_width");
-        cfg.weaponhead.maxWidth      = getParam<int>("wh_max_width");
-        cfg.weaponhead.darkMaxGray   = getParam<int>("wh_dark_max_gray");
-        cfg.weaponhead.contrastRatio = getParam<float>("wh_contrast_ratio");
-        cfg.weaponhead.minHeight     = getParam<int>("wh_min_height");
-        cfg.weaponhead.maxDrift      = getParam<int>("wh_max_drift");
-        cfg.weaponhead.blobGrayThr   = getParam<int>("wh_blob_gray_thr");
-        cfg.weaponhead.blobMinArea   = getParam<int>("wh_blob_min_area");
-        cfg.weaponhead.blobMaxSat    = getParam<float>("wh_blob_max_sat");
-        cfg.weaponhead.blobSolidity  = getParam<float>("wh_blob_solidity");
+        cfg.weaponhead.whModelPath      = getParam<std::string>("wh_model_path");
 
         // 类别名解析
         auto clsStr = getParam<std::string>("class_names");
@@ -462,25 +440,16 @@ private:
     bool initCore() {
         cfg_ = buildConfig();
 
-        // 检测器 (YOLO + 可选 weaponhead) 始终创建，即使相机暂不可用
-        // 这样节点可保持运行，支持通过 rqt/ param set 动态切换相机/视频源后恢复
+        // 检测器始终创建，即使相机暂不可用
         yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
-        if (cfg_.enableWeaponheadDetector || cfg_.detectorType == "weaponhead_detector") {
-            WeaponheadDetector::Params whParams;
-            whParams.blurKernel    = cfg_.weaponhead.blurKernel;
-            whParams.gradRatio     = cfg_.weaponhead.gradRatio;
-            whParams.searchBandV   = cfg_.weaponhead.searchBandV;
-            whParams.minWidth      = cfg_.weaponhead.minWidth;
-            whParams.maxWidth      = cfg_.weaponhead.maxWidth;
-            whParams.darkMaxGray   = cfg_.weaponhead.darkMaxGray;
-            whParams.contrastRatio = cfg_.weaponhead.contrastRatio;
-            whParams.minHeight     = cfg_.weaponhead.minHeight;
-            whParams.maxDrift      = cfg_.weaponhead.maxDrift;
-            whParams.blobGrayThr  = cfg_.weaponhead.blobGrayThr;
-            whParams.blobMinArea  = cfg_.weaponhead.blobMinArea;
-            whParams.blobMaxSat   = cfg_.weaponhead.blobMaxSat;
-            whParams.blobMinSolidity = cfg_.weaponhead.blobSolidity;
-            wh_detector_ = std::make_unique<WeaponheadDetector>(whParams);
+        // weaponhead YOLO 模型 (与3class并行)
+        if (!cfg_.weaponhead.whModelPath.empty()) {
+            std::vector<std::string> whClasses = {"WEAPONHEAD"};
+            wh_yolo_detector_ = std::make_unique<YoloDetector>(
+                cfg_.weaponhead.whModelPath, whClasses,
+                cfg_.model.inputSize,
+                cfg_.model.confThresh, cfg_.model.iouThresh,
+                cfg_.model.useCUDA);
         }
 
         camera_ = kfs::CameraFactory::create(cfg_);
@@ -500,10 +469,10 @@ private:
             camera_.reset();
         } else {
             RCLCPP_INFO(this->get_logger(),
-                        "相机:%dx%d | 模型:%s | wh:%s | conf:%.2f iou:%.2f cuda:%d",
+                        "相机:%dx%d | 模型:%s | whYOLO:%s | conf:%.2f iou:%.2f cuda:%d",
                         camera_->getWidth(), camera_->getHeight(),
                         cfg_.model.path.c_str(),
-                        (wh_detector_ ? "ON" : "OFF"),
+                        (wh_yolo_detector_ ? "ON" : "OFF"),
                         cfg_.model.confThresh, cfg_.model.iouThresh, cfg_.model.useCUDA);
         }
 
@@ -523,7 +492,8 @@ private:
             auto n = p.get_name();
             if (n == "conf_threshold" || n == "iou_threshold" ||
                 n == "use_cuda" || n == "model_path" ||
-                n == "input_size" || n == "class_names") {
+                n == "input_size" || n == "class_names" ||
+                n == "wh_model_path") {
                 needRebuildDetector = true;
             }
             if (n == "camera_type" || n == "usb_device" || n == "usb_width" ||
@@ -532,8 +502,7 @@ private:
                 n == "video_undistort") {
                 needRebuildCamera = true;
             }
-            if (n == "detector_type" || n == "enable_weaponhead" || n == "config_path" ||
-                n.rfind("wh_", 0) == 0) {
+            if (n == "detector_type" || n == "enable_weaponhead" || n == "config_path") {
                 needRebuildDetector = true;
             }
             if (n == "inference_enabled") {
@@ -572,29 +541,19 @@ private:
             std::lock_guard<std::mutex> lock(mtx_);
             if (!needRebuildCamera) cfg_ = buildConfig();
             yolo_detector_.reset();
-            wh_detector_.reset();
+            wh_yolo_detector_.reset();
             try {
                 yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
-                if (cfg_.enableWeaponheadDetector || cfg_.detectorType == "weaponhead_detector") {
-                    WeaponheadDetector::Params whParams;
-                    whParams.blurKernel    = cfg_.weaponhead.blurKernel;
-                    whParams.gradRatio     = cfg_.weaponhead.gradRatio;
-                    whParams.searchBandV   = cfg_.weaponhead.searchBandV;
-                    whParams.minWidth      = cfg_.weaponhead.minWidth;
-                    whParams.maxWidth      = cfg_.weaponhead.maxWidth;
-                    whParams.darkMaxGray   = cfg_.weaponhead.darkMaxGray;
-                    whParams.contrastRatio = cfg_.weaponhead.contrastRatio;
-                    whParams.minHeight     = cfg_.weaponhead.minHeight;
-                    whParams.maxDrift      = cfg_.weaponhead.maxDrift;
-                    whParams.blobGrayThr  = cfg_.weaponhead.blobGrayThr;
-                    whParams.blobMinArea  = cfg_.weaponhead.blobMinArea;
-                    whParams.blobMaxSat   = cfg_.weaponhead.blobMaxSat;
-                    whParams.blobMinSolidity = cfg_.weaponhead.blobSolidity;
-                    wh_detector_ = std::make_unique<WeaponheadDetector>(whParams);
+                if (!cfg_.weaponhead.whModelPath.empty()) {
+                    std::vector<std::string> whClasses = {"WEAPONHEAD"};
+                    wh_yolo_detector_ = std::make_unique<YoloDetector>(
+                        cfg_.weaponhead.whModelPath, whClasses,
+                        cfg_.model.inputSize, cfg_.model.confThresh, cfg_.model.iouThresh,
+                        cfg_.model.useCUDA);
                 }
                 RCLCPP_INFO(this->get_logger(),
-                            "检测器已重载 | wh:%s | conf:%.2f iou:%.2f cuda:%d",
-                            (wh_detector_ ? "ON" : "OFF"),
+                            "检测器已重载 | whYOLO:%s | conf:%.2f iou:%.2f cuda:%d",
+                            (wh_yolo_detector_ ? "ON" : "OFF"),
                             cfg_.model.confThresh, cfg_.model.iouThresh,
                             cfg_.model.useCUDA);
             } catch (const std::exception& e) {
@@ -632,17 +591,15 @@ private:
             if (yolo_detector_) {
                 result = yolo_detector_->detect(frame);
             }
-            if (wh_detector_) {
-                auto wh_res = wh_detector_->detect(frame);
-                // 松耦合: weaponhead 结果追加到 YOLO 结果中 (不同目标, e.g. WEAPONHEAD)
-                for (auto& d : wh_res.detections) {
+            if (wh_yolo_detector_) {
+                auto why_res = wh_yolo_detector_->detect(frame);
+                for (auto& d : why_res.detections) {
+                    // 标记为 WEAPONHEAD class，避免与3class ID冲突
+                    d.class_id = 99;
+                    d.class_name = "WEAPONHEAD";
                     result.detections.push_back(std::move(d));
                 }
-                if (result.inference_ms <= 0.0) {
-                    result.inference_ms = wh_res.inference_ms;
-                } else {
-                    result.inference_ms += wh_res.inference_ms;
-                }
+                result.inference_ms += why_res.inference_ms;
             }
             did_inference = true;
         }
@@ -730,164 +687,13 @@ private:
     }
 
     // ----------------------------------------------------------
-    // 诊断用图像: 2x3 六面板 (Gray | Blur | DarkMask | Grad | Pass | Laplacian)
+    // 诊断用图像: 2x3 六面板 — 匹配新 joint 算法
     // ----------------------------------------------------------
     cv::Mat buildDiagnosticImage(const cv::Mat& frame) {
+        // 简化诊断图: 原始帧(左) + 标注帧(右)
         if (frame.empty()) return {};
-
-        cv::Mat gray, gray3;
-        if (frame.channels() == 3) {
-            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-            cv::cvtColor(gray, gray3, cv::COLOR_GRAY2BGR);
-        } else {
-            gray = frame.clone();
-            cv::cvtColor(gray, gray3, cv::COLOR_GRAY2BGR);
-        }
-
-        const int w = gray.cols, h = gray.rows, cx = w / 2, cy = h / 2;
-
-        // 1) 模糊
-        cv::Mat blurred;
-        cv::GaussianBlur(gray, blurred, cv::Size(21, 21), 0);
-        cv::Mat blur3; cv::cvtColor(blurred, blur3, cv::COLOR_GRAY2BGR);
-
-        // 2) 暗部 mask (< 50, 同算法)
-        cv::Mat darkMask, darkColor;
-        cv::threshold(gray, darkMask, 50, 255, cv::THRESH_BINARY_INV);
-        cv::applyColorMap(darkMask, darkColor, cv::COLORMAP_HOT);
-
-        // 3) 逐行梯度 → Pass/Fail 图 (搜索带)
-        int vBand = 140;
-        int vTop = std::max(0, cy - vBand);
-        int vBot = std::min(h - 1, cy + vBand);
-        int vH = vBot - vTop + 1;
-
-        cv::Mat bandF, bandSm, grad;
-        blurred(cv::Range(vTop, vBot + 1), cv::Range::all()).convertTo(bandF, CV_32F);
-        cv::GaussianBlur(bandF, bandSm, cv::Size(9, 1), 0);
-
-        grad = cv::Mat::zeros(vH, w, CV_32F);
-        for (int x = 1; x < w - 1; ++x) {
-            cv::Mat d; cv::absdiff(bandSm.col(x + 1), bandSm.col(x - 1), d);
-            d.copyTo(grad.col(x)); grad.col(x) *= 0.5f;
-        }
-        cv::GaussianBlur(grad, grad, cv::Size(21, 1), 0);
-
-        // 全局梯度热力图
-        double globalGmax;
-        cv::minMaxLoc(grad, nullptr, &globalGmax);
-        cv::Mat gradColor;
-        grad.convertTo(gradColor, CV_8UC1, globalGmax > 0 ? 255.0 / globalGmax : 1.0);
-        cv::applyColorMap(gradColor, gradColor, cv::COLORMAP_INFERNO);
-
-        // 逐行扫描 Pass/Fail
-        cv::Mat passMap = cv::Mat::zeros(vH, w, CV_8UC3);
-        cv::Mat grayF; gray.convertTo(grayF, CV_32F);
-        int passCount = 0;
-
-        for (int yi = 0; yi < vH; ++yi) {
-            int yAbs = vTop + yi;
-            double gmin, gmax;
-            cv::minMaxLoc(grad.row(yi), &gmin, &gmax);
-            if (gmax < 1.5) continue;
-            float gthresh = std::max(2.0f, float(gmax) * 0.35f);
-
-            const float* gptr = grad.ptr<float>(yi);
-            int left = 0, right = w - 1;
-            for (int x = cx; x >= 0; --x)   { if (gptr[x] > gthresh) { left = x; break; } }
-            for (int x = cx; x < w; ++x)    { if (gptr[x] > gthresh) { right = x; break; } }
-
-            int rw = right - left;
-            if (rw < 16 || rw > 300) continue;
-            if (left == 0 || right == w - 1) continue;
-
-            cv::Scalar rm = cv::mean(grayF.row(yAbs).colRange(left, right));
-            if (rm[0] > 100) continue;
-
-            float outL = float(cv::mean(grayF.row(yAbs).colRange(std::max(0,left-12), left))[0]);
-            float inL  = float(cv::mean(grayF.row(yAbs).colRange(left, std::min(left+12, right)))[0]);
-            float outR = float(cv::mean(grayF.row(yAbs).colRange(right, std::min(w,right+12)))[0]);
-            float inR  = float(cv::mean(grayF.row(yAbs).colRange(std::max(left,right-12), right))[0]);
-            bool lc = (inL > 0) ? (outL / inL) >= 1.15f : (outL > 20);
-            bool rc = (inR > 0) ? (outR / inR) >= 1.15f : (outR > 20);
-            if (!lc && !rc) continue;
-
-            cv::line(passMap, {left, yi}, {right, yi}, {0, 255, 0}, 1);
-            cv::circle(passMap, {left, yi}, 1, {255, 0, 0}, -1);
-            cv::circle(passMap, {right, yi}, 1, {0, 0, 255}, -1);
-            passCount++;
-        }
-
-        // 4) Blob 检测可视化
-        cv::Mat blobVis = cv::Mat::zeros(h, w, CV_8UC3);
-        {
-            cv::Mat mask50;
-            cv::threshold(gray, mask50, 50, 255, cv::THRESH_BINARY_INV);
-            cv::Mat maskCopy = mask50.clone();
-            std::vector<std::vector<cv::Point>> contours;
-            cv::findContours(maskCopy, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-            for (const auto& cnt : contours) {
-                double area = cv::contourArea(cnt);
-                if (area < 500) continue;
-                std::vector<cv::Point> hull;
-                cv::convexHull(cnt, hull);
-                double hullArea = cv::contourArea(hull);
-                float solidity = (hullArea > 0) ? float(area / hullArea) : 0;
-                cv::Rect box = cv::boundingRect(cnt);
-                cv::Mat roiM = mask50(box);
-                cv::Mat roiH; cv::cvtColor(frame(box), roiH, cv::COLOR_BGR2HSV);
-                float s = float(cv::mean(roiH, roiM)[1]);
-                cv::Scalar col = (solidity >= 0.80f && s <= 80.0f) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 0, 255);
-                cv::drawContours(blobVis, std::vector<std::vector<cv::Point>>{cnt}, -1, col, 2);
-                cv::rectangle(blobVis, box, col, 1);
-            }
-        }
-
-        // ── 拼图: 2 行 × 3 列 ──
-        int pad = 10, labelH = 20;
-        int cellW = w, cellH = h;
-        int totalW = cellW * 3 + pad * 4;
-        int totalH = labelH + cellH + pad + labelH + cellH + pad;
-        cv::Mat board(totalH, totalW, CV_8UC3, cv::Scalar(30, 30, 30));
-
-        auto putLabel = [&](int x, int y, const std::string& t, cv::Scalar c = {200, 200, 200}) {
-            cv::putText(board, t, {x, y + 15}, cv::FONT_HERSHEY_SIMPLEX, 0.5, c, 1);
-        };
-        auto drawCenter = [&](int x, int y) {
-            cv::line(board, {x + cx, y}, {x + cx, y + cellH - 1}, {0, 255, 255}, 1);
-        };
-
-        // Row0
-        int r0y = pad;
-        int c0x = pad, c1x = pad * 2 + cellW, c2x = pad * 3 + cellW * 2;
-
-        putLabel(c0x, r0y, "1. Gray"); gray3.copyTo(board(cv::Rect(c0x, r0y + labelH, cellW, cellH))); drawCenter(c0x, r0y + labelH);
-        putLabel(c1x, r0y, "2. Blurred k=21"); blur3.copyTo(board(cv::Rect(c1x, r0y + labelH, cellW, cellH)));
-        putLabel(c2x, r0y, "3. Dark mask (thr=50)"); darkColor.copyTo(board(cv::Rect(c2x, r0y + labelH, cellW, cellH)));
-
-        // Row1
-        int r1y = r0y + labelH + cellH + pad;
-        putLabel(c0x, r1y, "4. |Gradient| (max=" + std::to_string(int(globalGmax)) + ")");
-        gradColor.copyTo(board(cv::Rect(c0x, r1y + labelH, cellW, vH)));
-
-        putLabel(c1x, r1y, "5. Pass rows (green=pass, " + std::to_string(passCount) + " rows)");
-        passMap.copyTo(board(cv::Rect(c1x, r1y + labelH, cellW, vH)));
-
-        putLabel(c2x, r1y, "6. Blob (green=valid, red=reject)");
-        blobVis.copyTo(board(cv::Rect(c2x, r1y + labelH, cellW, cellH)));
-
-        // 如果最后有检测结果, 叠加到 panel 1/2/3
-        if (!last_result_.detections.empty()) {
-            for (const auto& d : last_result_.detections) {
-                int l = int(d.corner_tl.x), t = int(d.corner_tl.y);
-                int r = int(d.corner_br.x), b = int(d.corner_br.y);
-                cv::Scalar col = (d.class_name == "WEAPONHEAD") ? cv::Scalar(0, 255, 255) : cv::Scalar(255, 0, 0);
-                cv::rectangle(board, {c0x + l, r0y + labelH + t}, {c0x + r, r0y + labelH + b}, col, 2);
-                cv::rectangle(board, {c1x + l, r0y + labelH + t}, {c1x + r, r0y + labelH + b}, col, 2);
-                cv::rectangle(board, {c2x + l, r0y + labelH + t}, {c2x + r, r0y + labelH + b}, col, 2);
-            }
-        }
-
+        cv::Mat board;
+        cv::hconcat(frame, last_debug_image_.empty() ? frame : last_debug_image_, board);
         return board;
     }
 
@@ -904,9 +710,9 @@ private:
     // ---- 核心 ----
     kfs::Config                          cfg_;
     std::unique_ptr<kfs::ICameraCapture> camera_;
-    // 检测器: 两种实现松耦合共存, 运行时根据 cfg.detectorType 选择其一
+    // 检测器: YOLO 3class + weaponhead YOLO 并行
     std::unique_ptr<YoloDetector>        yolo_detector_;
-    std::unique_ptr<WeaponheadDetector>  wh_detector_;
+    std::unique_ptr<YoloDetector>        wh_yolo_detector_;
 
     // ---- ROS2 ----
     rclcpp::Publisher<kfs_core::msg::InferResults>::SharedPtr  pub_results_;

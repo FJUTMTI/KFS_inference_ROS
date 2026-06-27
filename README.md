@@ -36,8 +36,7 @@ kfs_infer_node (ROS2 Node)
 ├── kfs::ICameraCapture  ← 相机抽象接口
 │   ├── RealSenseCapture (librealsense2)
 │   └── USBCapture       (OpenCV VideoCapture / V4L2)
-├── YoloDetector         ← ONNX Runtime 推理
-├── WeaponheadDetector   ← 传统 OpenCV (可选, 松耦合, USB 虚焦 weaponhead 左右边界)
+├── YoloDetector ×2      ← ONNX Runtime 推理 (3class + weaponhead 并行)
 ├── kfs::Config          ← YAML + ROS 参数配置
 └── kfs::CameraFactory   ← 相机工厂
 
@@ -153,8 +152,7 @@ python scripts/export_onnx.py \
 
 编辑 `kfs_core/config/kfs_config.yaml`（从工作空间根运行时路径），或通过 ROS2 参数覆盖。
 
-关键新增：
-- `detector.enable_weaponhead: true` 可与 YOLO 并行启用传统 OpenCV weaponhead 检测（USB 相机下识别虚焦中央物体轮廓左右边界）。
+- `weaponhead_detector.wh_model_path` 配置 weaponhead 专用 YOLO 模型，与 3class 模型并行推理。
 - `camera.type: video` + `video.path` 支持用本地视频文件 (如 assets/001.mp4) 代替摄像头，用于调试和效果验证（支持 loop 循环）。
 
 ```yaml
@@ -198,7 +196,11 @@ display:
 
 detector:
   type: yolo
-  enable_weaponhead: false   # 启用后与 YOLO 并行 (weaponhead_detector 传统 CV)
+  enable_weaponhead: false
+
+# weaponhead YOLO 模型 (与 3class 并行推理)
+weaponhead_detector:
+  wh_model_path: "kfs_core/models/kfs_weaponhead_v1.onnx"  # 空=不使用
 ```
 
 ## 相机标定 (USB 摄像头)

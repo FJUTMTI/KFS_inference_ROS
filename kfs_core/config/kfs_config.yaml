@@ -6,7 +6,7 @@ camera:
   # --- 视频文件模式 (调试/效果验证, 代替摄像头) ---
   # 将 type 改为 "video" 并配置 video 子项即可使用本地 mp4 作为输入流 (支持循环播放)
   video:
-    path: "kfs_core/assets/001.mp4"
+    path: "kfs_core/assets/002.mp4"
     loop: true
     calibration_file: "kfs_core/config/ost.yaml"  # 可选, 复用标定
     undistort: true
@@ -46,23 +46,9 @@ detector:
   enable_weaponhead: true  # 是否启用 weaponhead_detector (传统 OpenCV)
 
 # ============================================================
-# weaponhead_detector 检测参数 (双路: 梯度扫描 + blob验证)
+# weaponhead YOLO 模型 (与3class并行推理)
 # ============================================================
 weaponhead_detector:
   enabled: true
-  # A路: 梯度扫描
-  blur_kernel: 21        # 高斯模糊核
-  grad_ratio: 0.35        # 梯度阈值比例
-  search_band_v: 140      # 垂直搜索范围
-  min_width: 16           # 最小行宽度
-  max_width: 300          # 最大行宽度
-  dark_max_gray: 100      # 行内灰度上限
-  contrast_ratio: 1.15    # 边缘对比度比
-  min_height: 14          # 最小有效行数
-  max_drift: 35           # 行聚类漂移上限
-  # B路: blob 验证
-  blob_gray_thr: 50       # 二值化阈值
-  blob_min_area: 500      # blob 最小面积
-  blob_max_sat: 80.0      # blob 饱和度上限
-  blob_solidity: 0.80     # blob 紧密度下限
-  max_aspect: 0.70          # 最大宽高比            
+  # YOLO 模型路径 (与3class并行推理, 空字符串=不使用)
+  wh_model_path: "kfs_core/models/kfs_weaponhead_v1.onnx"

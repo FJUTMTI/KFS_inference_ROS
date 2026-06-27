@@ -56,23 +56,9 @@ struct DisplayConfig {
     bool debug = true;
 };
 
-/// weaponhead_detector 参数
+/// weaponhead YOLO 模型配置 (与3class并行推理)
 struct WeaponheadConfig {
-    // A路: 梯度扫描
-    int   blurKernel    = 21;
-    float gradRatio     = 0.35f;
-    int   searchBandV   = 140;
-    int   minWidth      = 16;
-    int   maxWidth      = 300;
-    int   darkMaxGray   = 100;
-    float contrastRatio = 1.15f;
-    int   minHeight     = 14;
-    int   maxDrift      = 35;
-    // B路: blob 验证
-    int   blobGrayThr   = 50;
-    int   blobMinArea   = 500;
-    float blobMaxSat    = 80.0f;
-    float blobSolidity  = 0.80f;  // blob 紧密度下限
+    std::string whModelPath = "";  // 空=不使用
 };
 
 // ============================================================

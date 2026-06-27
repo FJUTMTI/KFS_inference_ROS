@@ -19,7 +19,7 @@ namespace kfs {
 struct CameraFactory {
     /**
      * @brief 根据配置创建相机
-     * @param cfg  全局配置 (主要使用 cameraType 和 USB/controls 子项)
+     * @param cfg  全局配置 (主要使用 cameraType 和 usb/video/controls 子项)
      * @return     相机实例, 失败返回 nullptr
      */
     static std::unique_ptr<ICameraCapture> create(const Config& cfg);

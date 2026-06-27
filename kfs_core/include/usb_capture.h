@@ -19,6 +19,7 @@ struct CameraResolution {
  * @brief USB / Video0 摄像头捕获器 (基于 OpenCV VideoCapture)
  *
  * 支持任意 V4L2 USB 摄像头, 可配置分辨率、帧率、设备号、曝光等参数。
+ * 同时支持打开视频文件 (用于 camera.type=video 调试模式, 代替摄像头)。
  * 实现 kfs::ICameraCapture 接口，可被 CameraFactory 透明创建。
  */
 class USBCapture : public kfs::ICameraCapture {
@@ -54,6 +55,18 @@ public:
                const std::string& fourcc = "",
                const std::string& calibration_file = "",
                bool undistort = false);
+
+    /**
+     * @brief 视频文件构造 (调试/验证用, 无需真实摄像头)
+     * @param video_path        视频文件路径 (e.g. "assets/001.mp4")
+     * @param calibration_file  可选标定文件, 同 usb
+     * @param undistort         是否自动畸变矫正
+     * @param loop_playback     播放完是否自动 seek 到开头循环
+     */
+    USBCapture(const std::string& video_path,
+               const std::string& calibration_file = "",
+               bool undistort = false,
+               bool loop_playback = true);
 
     ~USBCapture() override;
 

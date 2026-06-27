@@ -153,11 +153,13 @@ python scripts/export_onnx.py \
 
 编辑 `kfs_core/config/kfs_config.yaml`（从工作空间根运行时路径），或通过 ROS2 参数覆盖。
 
-关键新增：`detector.enable_weaponhead: true` 可与 YOLO 并行启用传统 OpenCV weaponhead 检测（USB 相机下识别虚焦中央物体轮廓左右边界）。
+关键新增：
+- `detector.enable_weaponhead: true` 可与 YOLO 并行启用传统 OpenCV weaponhead 检测（USB 相机下识别虚焦中央物体轮廓左右边界）。
+- `camera.type: video` + `video.path` 支持用本地视频文件 (如 assets/001.mp4) 代替摄像头，用于调试和效果验证（支持 loop 循环）。
 
 ```yaml
 camera:
-  type: usb               # "usb" 或 "realsense"
+  type: usb               # "usb" | "realsense" | "video"
   usb:
     device: 0
     width: 640
@@ -172,6 +174,16 @@ camera:
     contrast: 50
     saturation: 64
     sharpness: 50
+
+# 视频文件调试模式（推荐用于可复现的开发/验证，无需连接摄像头）
+# camera:
+#   type: video
+#   video:
+#     path: "kfs_core/assets/001.mp4"   # 替换为你的测试视频
+#     loop: true                        # 循环播放
+#     calibration_file: "kfs_core/config/ost.yaml"
+#     undistort: false
+# （此时 usb/controls 会被忽略；ROS2 节点也支持通过 -p video_path:=... 等参数动态切换）
 
 model:
   path: kfs_core/models/kfs_yolo11_3class.onnx

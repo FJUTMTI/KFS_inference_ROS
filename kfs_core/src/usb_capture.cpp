@@ -8,7 +8,8 @@
 #include <fstream>
 
 struct USBCapture::Impl {
-    int  deviceId, requestW, requestH, requestFPS;
+    int  deviceId = -1;
+    int  requestW, requestH, requestFPS;
     int  realWidth = 0, realHeight = 0, realFPS = 30;
     int  fourccCode;
     bool running = false;
@@ -22,6 +23,11 @@ struct USBCapture::Impl {
     cv::Mat undistMap1, undistMap2;
     bool mapsReady = false;
 
+    // video file mode (type=video)
+    bool        isFile = false;
+    std::string videoPath;
+    bool        loop = true;
+
     Impl(int devId, int w, int h, int f, const std::string& fourcc, const std::string& calib_file, bool undist)
         : deviceId(devId), requestW(w), requestH(h), requestFPS(f), calibrationFile(calib_file), doUndistort(undist) {
         if (fourcc == "MJPG" || fourcc == "mjpg")
@@ -29,6 +35,13 @@ struct USBCapture::Impl {
         else if (fourcc == "YUYV" || fourcc == "yuyv")
             fourccCode = cv::VideoWriter::fourcc('Y','U','Y','V');
         else fourccCode = -1;
+        loadCalibration();
+    }
+
+    Impl(const std::string& path, const std::string& calib_file, bool undist, bool loop_play)
+        : requestW(0), requestH(0), requestFPS(0), calibrationFile(calib_file), doUndistort(undist),
+          isFile(true), videoPath(path), loop(loop_play) {
+        fourccCode = -1;
         loadCalibration();
     }
 
@@ -51,7 +64,7 @@ struct USBCapture::Impl {
                     if (root["image_width"]) calibratedIntrinsics.width = root["image_width"].as<int>();
                     if (root["image_height"]) calibratedIntrinsics.height = root["image_height"].as<int>();
                     intrinsicsLoaded = true;
-                    std::cout << "[USB] 已加载相机标定: " << calibrationFile
+                    std::cout << "[Capture] 已加载相机标定: " << calibrationFile
                               << " fx=" << fx << " fy=" << fy << " cx=" << cx << " cy=" << cy << std::endl;
                 }
             }
@@ -63,7 +76,7 @@ struct USBCapture::Impl {
                 calibratedIntrinsics.cx = k[2].as<float>();
                 calibratedIntrinsics.cy = k[5].as<float>();
                 intrinsicsLoaded = true;
-                std::cout << "[USB] 已加载相机标定(K): " << calibrationFile << std::endl;
+                std::cout << "[Capture] 已加载相机标定(K): " << calibrationFile << std::endl;
             }
 
             // Load distortion coefficients (supports plumb_bob 5 or rational 8)
@@ -86,10 +99,10 @@ struct USBCapture::Impl {
             }
 
             if (!distortionCoeffs.empty() && intrinsicsLoaded) {
-                std::cout << "[USB] 畸变系数已加载 (" << distortionCoeffs.size() << " 个)\n";
+                std::cout << "[Capture] 畸变系数已加载 (" << distortionCoeffs.size() << " 个)\n";
             }
         } catch (const std::exception& e) {
-            std::cout << "[USB] 标定文件加载失败 '" << calibrationFile << "': " << e.what() << " (回退默认内参)\n";
+            std::cout << "[Capture] 标定文件加载失败 '" << calibrationFile << "': " << e.what() << " (回退默认内参)\n";
         }
     }
 
@@ -132,40 +145,47 @@ struct USBCapture::Impl {
             calibratedIntrinsics.width = w;
             calibratedIntrinsics.height = h;
 
-            std::cout << "[USB] 畸变矫正地图已初始化 (" << w << "x" << h << ")\n";
+            std::cout << "[Capture] 畸变矫正地图已初始化 (" << w << "x" << h << ")\n";
         }
     }
 
     bool start() {
         if (running) return true;
 
-        // 打开设备 — OpenCV 全权管理 V4L2
-        if (!cap.open(deviceId, cv::CAP_V4L2))
-            cap.open(deviceId);
-        if (!cap.isOpened()) {
-            std::cout << "[USB] 无法打开 /dev/video" << deviceId << "\n";
-            return false;
+        if (isFile) {
+            if (videoPath.empty() || !cap.open(videoPath)) {
+                std::cout << "[Video] 无法打开视频文件: " << videoPath << "\n";
+                return false;
+            }
+        } else {
+            // 打开设备 — OpenCV 全权管理 V4L2
+            if (!cap.open(deviceId, cv::CAP_V4L2))
+                cap.open(deviceId);
+            if (!cap.isOpened()) {
+                std::cout << "[USB] 无法打开 /dev/video" << deviceId << "\n";
+                return false;
+            }
+
+            // 设置 FOURCC
+            if (fourccCode != -1)
+                cap.set(cv::CAP_PROP_FOURCC, static_cast<double>(fourccCode));
+
+            // 设置分辨率
+            cap.set(cv::CAP_PROP_FRAME_WIDTH,  static_cast<double>(requestW));
+            cap.set(cv::CAP_PROP_FRAME_HEIGHT, static_cast<double>(requestH));
+
+            // V4L2 控制通过 OpenCV (部分有效)
+            if (pendingCtrls.autoExposure == 1)
+                cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 0.25);
+            if (pendingCtrls.brightness >= 0)
+                cap.set(cv::CAP_PROP_BRIGHTNESS, static_cast<double>(pendingCtrls.brightness));
+            if (pendingCtrls.contrast >= 0)
+                cap.set(cv::CAP_PROP_CONTRAST, static_cast<double>(pendingCtrls.contrast));
+            if (pendingCtrls.saturation >= 0)
+                cap.set(cv::CAP_PROP_SATURATION, static_cast<double>(pendingCtrls.saturation));
+            if (pendingCtrls.gain >= 0)
+                cap.set(cv::CAP_PROP_GAIN, static_cast<double>(pendingCtrls.gain));
         }
-
-        // 设置 FOURCC
-        if (fourccCode != -1)
-            cap.set(cv::CAP_PROP_FOURCC, static_cast<double>(fourccCode));
-
-        // 设置分辨率
-        cap.set(cv::CAP_PROP_FRAME_WIDTH,  static_cast<double>(requestW));
-        cap.set(cv::CAP_PROP_FRAME_HEIGHT, static_cast<double>(requestH));
-
-        // V4L2 控制通过 OpenCV (部分有效)
-        if (pendingCtrls.autoExposure == 1)
-            cap.set(cv::CAP_PROP_AUTO_EXPOSURE, 0.25);
-        if (pendingCtrls.brightness >= 0)
-            cap.set(cv::CAP_PROP_BRIGHTNESS, static_cast<double>(pendingCtrls.brightness));
-        if (pendingCtrls.contrast >= 0)
-            cap.set(cv::CAP_PROP_CONTRAST, static_cast<double>(pendingCtrls.contrast));
-        if (pendingCtrls.saturation >= 0)
-            cap.set(cv::CAP_PROP_SATURATION, static_cast<double>(pendingCtrls.saturation));
-        if (pendingCtrls.gain >= 0)
-            cap.set(cv::CAP_PROP_GAIN, static_cast<double>(pendingCtrls.gain));
 
         // 读实际参数
         realWidth  = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
@@ -184,8 +204,13 @@ struct USBCapture::Impl {
         for (auto& ch:cc) if (ch<32||ch>126) ch='?';
 
         running = true;
-        std::cout << "[USB] " << cc << " " << realWidth << "×" << realHeight
-                  << " @ " << realFPS << "fps" << std::endl;
+        if (isFile) {
+            std::cout << "[Video] " << videoPath << " " << realWidth << "×" << realHeight
+                      << " @ " << realFPS << "fps" << (loop ? " (loop)" : "") << std::endl;
+        } else {
+            std::cout << "[USB] " << cc << " " << realWidth << "×" << realHeight
+                      << " @ " << realFPS << "fps" << std::endl;
+        }
         return true;
     }
 
@@ -193,11 +218,24 @@ struct USBCapture::Impl {
         if (!running) return;
         running = false;
         cap.release();
-        std::cout << "[USB] 已释放\n";
+        if (isFile) {
+            std::cout << "[Video] 已释放\n";
+        } else {
+            std::cout << "[USB] 已释放\n";
+        }
     }
 
     bool getFrame(cv::Mat& f) {
-        if (!running || !cap.read(f)) return false;
+        if (!running) return false;
+        if (!cap.read(f)) {
+            if (isFile && loop && !videoPath.empty()) {
+                // 循环播放: seek 到开头重试
+                cap.set(cv::CAP_PROP_POS_FRAMES, 0.0);
+                if (!cap.read(f)) return false;
+            } else {
+                return false;
+            }
+        }
 
         if (doUndistort && mapsReady && !undistMap1.empty() && !undistMap2.empty()) {
             cv::Mat undistorted;
@@ -210,6 +248,8 @@ struct USBCapture::Impl {
 
 USBCapture::USBCapture(int d,int w,int h,int fps,const std::string& fc, const std::string& calib, bool undist)
     : pImpl(std::make_unique<Impl>(d,w,h,fps,fc,calib,undist)) {}
+USBCapture::USBCapture(const std::string& path, const std::string& calib, bool undist, bool loop)
+    : pImpl(std::make_unique<Impl>(path, calib, undist, loop)) {}
 USBCapture::~USBCapture(){pImpl->stop();}
 bool USBCapture::start(){return pImpl->start();}
 void USBCapture::stop(){pImpl->stop();}
@@ -218,7 +258,7 @@ bool USBCapture::getFrame(cv::Mat& f){return pImpl->getFrame(f);}
 int USBCapture::getWidth()const{return pImpl->realWidth;}
 int USBCapture::getHeight()const{return pImpl->realHeight;}
 int USBCapture::getFPS()const{return pImpl->realFPS;}
-int USBCapture::getDeviceId()const{return pImpl->deviceId;}
+int USBCapture::getDeviceId()const{return pImpl->isFile ? -1 : pImpl->deviceId;}
 void USBCapture::applyControls(const CameraControls& c){pImpl->pendingCtrls=c;}
 kfs::CameraIntrinsics USBCapture::getIntrinsics()const{
     if (pImpl->intrinsicsLoaded) {

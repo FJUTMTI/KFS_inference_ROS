@@ -59,6 +59,14 @@ Config loadConfig(const std::string& yamlPath) {
             cfg.usb.undistort = yamlBool(usb, "undistort", cfg.usb.undistort);
         }
 
+        if (cam["video"]) {
+            auto vid = cam["video"];
+            cfg.video.path = yamlStr(vid, "path", cfg.video.path);
+            cfg.video.loop = yamlBool(vid, "loop", cfg.video.loop);
+            cfg.video.calibration_file = yamlStr(vid, "calibration_file", cfg.video.calibration_file);
+            cfg.video.undistort = yamlBool(vid, "undistort", cfg.video.undistort);
+        }
+
         if (cam["controls"]) {
             auto ctrl = cam["controls"];
             cfg.controls.autoExposure = yamlInt(ctrl, "auto_exposure", cfg.controls.autoExposure);

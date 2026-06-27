@@ -31,6 +31,15 @@ std::unique_ptr<ICameraCapture> CameraFactory::create(const Config& cfg) {
         return cam;
     }
 
+    if (cfg.cameraType == "video") {
+        auto cam = std::make_unique<USBCapture>(
+            cfg.video.path,
+            cfg.video.calibration_file,
+            cfg.video.undistort,
+            cfg.video.loop);
+        return cam;
+    }
+
 #ifdef HAS_REALSENSE
     if (cfg.cameraType == "realsense") {
         return std::make_unique<RealSenseCapture>(1920, 1080, 30);
@@ -41,7 +50,7 @@ std::unique_ptr<ICameraCapture> CameraFactory::create(const Config& cfg) {
     }
 #endif
 
-    std::cerr << "[CameraFactory] 未知相机类型: " << cfg.cameraType << "\n";
+    std::cerr << "[CameraFactory] 未知相机类型: " << cfg.cameraType << " (支持: usb, realsense, video)\n";
     return nullptr;
 }
 

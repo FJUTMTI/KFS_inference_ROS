@@ -31,6 +31,10 @@
  *     usb_height          — USB 分辨率高
  *     usb_fps             — USB 帧率
  *     usb_fourcc          — USB 编码 (MJPG / YUYV)
+ *     video_path          — 视频文件路径 (camera_type=video 时启用, 代替摄像头；默认 kfs_core/assets/001.mp4)
+ *     video_loop          — 视频循环播放
+ *     video_calibration_file — 视频对应的标定文件
+ *     video_undistort     — 视频帧是否做畸变矫正
  *     detector_type       — 检测器类型 (yolo / weaponhead_detector)
  *     enable_weaponhead   — 是否并行启用 weaponhead_detector (传统 CV 虚焦 weaponhead 左右边界)
  *     inference_enabled   — 推理使能
@@ -163,47 +167,89 @@ public:
             // 未安装时回退到相对路径 (从工作空间根运行)
         }
 
-        // ---- 声明全部参数 (支持 rqt_reconfigure 动态调节) ----
+        // 尽早声明 config_path（允许命令行 -p config_path:=... 覆盖）
         declareParam<std::string>("config_path",        config_default);
+
+        // 预加载 YAML 以便将 YAML 中的值作为其他参数的 declare 默认值。
+        // 这样用户只需在 kfs_config.yaml 中把 camera.type 设为 video 即可生效（ROS 节点也会尊重它），
+        // 同时命令行 -p camera_type:=xxx 等仍可覆盖。
+        // 如果未提供 config_path 或加载失败，则回退到硬编码默认。
+        kfs::Config seed_cfg;
+        bool seed_loaded = false;
+        {
+            std::string yaml_for_seed = config_default;
+            try {
+                rclcpp::Parameter p;
+                if (this->get_parameter("config_path", p)) {
+                    yaml_for_seed = p.as_string();
+                }
+            } catch (const std::exception&) {}
+            if (!yaml_for_seed.empty()) {
+                try {
+                    seed_cfg = kfs::loadConfig(yaml_for_seed);
+                    seed_loaded = true;
+                } catch (const std::exception& e) {
+                    RCLCPP_WARN(this->get_logger(), "用于参数默认值的 YAML 加载失败 (%s)，将使用内置默认值", e.what());
+                }
+            }
+        }
+
+        // ---- 声明全部参数 (支持 rqt_reconfigure 动态调节) ----
+        // 大部分默认值来自 seed_cfg（即 YAML），以便配置文件修改立即影响节点默认行为。
         declareParam<bool>       ("debug_image",         true);
-        declareParam<float>      ("conf_threshold",      0.25f, 0.0f, 1.0f);
-        declareParam<float>      ("iou_threshold",       0.30f, 0.0f, 1.0f);
-        declareParam<bool>       ("use_cuda",            true);
-        declareParam<std::string>("model_path",          model_default);
-        declareParam<std::string>("camera_type",         "usb");
-        declareParam<int>        ("usb_device",          0, 0, 63);
-        declareParam<int>        ("usb_width",           640, 160, 3840);
-        declareParam<int>        ("usb_height",          480, 120, 2160);
-        declareParam<int>        ("usb_fps",             60, 1, 240);
-        declareParam<std::string>("usb_fourcc",          "MJPG");
+        declareParam<float>      ("conf_threshold",      seed_loaded ? seed_cfg.model.confThresh : 0.25f, 0.0f, 1.0f);
+        declareParam<float>      ("iou_threshold",       seed_loaded ? seed_cfg.model.iouThresh : 0.30f, 0.0f, 1.0f);
+        declareParam<bool>       ("use_cuda",            seed_loaded ? seed_cfg.model.useCUDA : true);
+        declareParam<std::string>("model_path",          seed_loaded ? seed_cfg.model.path : model_default);
+        declareParam<std::string>("camera_type",         seed_loaded ? seed_cfg.cameraType : "usb");
+        declareParam<int>        ("usb_device",          seed_loaded ? seed_cfg.usb.device : 0, 0, 63);
+        declareParam<int>        ("usb_width",           seed_loaded ? seed_cfg.usb.width : 640, 160, 3840);
+        declareParam<int>        ("usb_height",          seed_loaded ? seed_cfg.usb.height : 480, 120, 2160);
+        declareParam<int>        ("usb_fps",             seed_loaded ? seed_cfg.usb.fps : 60, 1, 240);
+        declareParam<std::string>("usb_fourcc",          seed_loaded ? seed_cfg.usb.fourcc : "MJPG");
+        declareParam<std::string>("video_path",          seed_loaded ? seed_cfg.video.path : "kfs_core/assets/001.mp4");
+        declareParam<bool>       ("video_loop",          seed_loaded ? seed_cfg.video.loop : true);
+        declareParam<std::string>("video_calibration_file", seed_loaded ? seed_cfg.video.calibration_file : "");
+        declareParam<bool>       ("video_undistort",     seed_loaded ? seed_cfg.video.undistort : false);
         declareParam<bool>       ("inference_enabled",   true);
-        declareParam<int>        ("input_size",          640, 320, 1280);
-        declareParam<std::string>("detector_type",      "yolo");  // "yolo" | "weaponhead_detector"
-        declareParam<bool>       ("enable_weaponhead",    true);   // 与 YOLO 并行启用 weaponhead_detector (CV 虚焦左右边界)
+        declareParam<int>        ("input_size",          seed_loaded ? seed_cfg.model.inputSize : 640, 320, 1280);
+        declareParam<std::string>("detector_type",       seed_loaded ? seed_cfg.detectorType : "yolo");  // "yolo" | "weaponhead_detector"
+        declareParam<bool>       ("enable_weaponhead",   seed_loaded ? seed_cfg.enableWeaponheadDetector : true);   // 与 YOLO 并行启用 weaponhead_detector (CV 虚焦左右边界)
 
         // weaponhead_detector 参数 (动态调节)
-        declareParam<int>        ("wh_blur_kernel",      21,   3, 51);
-        declareParam<float>      ("wh_grad_ratio",       0.35f, 0.05f, 0.95f);
-        declareParam<int>        ("wh_search_band_v",    140,  20, 240);
-        declareParam<int>        ("wh_min_width",        16,   4,  100);
-        declareParam<int>        ("wh_max_width",        300,  30, 640);
-        declareParam<int>        ("wh_dark_max_gray",    100,   5,  200);
-        declareParam<float>      ("wh_contrast_ratio",   1.15f, 1.0f, 10.0f);
-        declareParam<int>        ("wh_min_height",       14,   2,  100);
-        declareParam<int>        ("wh_max_drift",        35,   2,  80);
-        declareParam<int>        ("wh_blob_gray_thr",    50,   10, 150);
-        declareParam<int>        ("wh_blob_min_area",    500,  100, 5000);
-        declareParam<float>      ("wh_blob_max_sat",     80.0f, 0.0f, 255.0f);
-        declareParam<float>      ("wh_blob_solidity",    0.80f, 0.50f, 1.0f);
+        declareParam<int>        ("wh_blur_kernel",      seed_loaded ? seed_cfg.weaponhead.blurKernel : 21,   3, 51);
+        declareParam<float>      ("wh_grad_ratio",       seed_loaded ? seed_cfg.weaponhead.gradRatio : 0.35f, 0.05f, 0.95f);
+        declareParam<int>        ("wh_search_band_v",    seed_loaded ? seed_cfg.weaponhead.searchBandV : 140,  20, 240);
+        declareParam<int>        ("wh_min_width",        seed_loaded ? seed_cfg.weaponhead.minWidth : 16,   4,  100);
+        declareParam<int>        ("wh_max_width",        seed_loaded ? seed_cfg.weaponhead.maxWidth : 300,  30, 640);
+        declareParam<int>        ("wh_dark_max_gray",    seed_loaded ? seed_cfg.weaponhead.darkMaxGray : 100,   5,  200);
+        declareParam<float>      ("wh_contrast_ratio",   seed_loaded ? seed_cfg.weaponhead.contrastRatio : 1.15f, 1.0f, 10.0f);
+        declareParam<int>        ("wh_min_height",       seed_loaded ? seed_cfg.weaponhead.minHeight : 14,   2,  100);
+        declareParam<int>        ("wh_max_drift",        seed_loaded ? seed_cfg.weaponhead.maxDrift : 35,   2,  80);
+        declareParam<int>        ("wh_blob_gray_thr",    seed_loaded ? seed_cfg.weaponhead.blobGrayThr : 50,   10, 150);
+        declareParam<int>        ("wh_blob_min_area",    seed_loaded ? seed_cfg.weaponhead.blobMinArea : 500,  100, 5000);
+        declareParam<float>      ("wh_blob_max_sat",     seed_loaded ? seed_cfg.weaponhead.blobMaxSat : 80.0f, 0.0f, 255.0f);
+        declareParam<float>      ("wh_blob_solidity",    seed_loaded ? seed_cfg.weaponhead.blobSolidity : 0.80f, 0.50f, 1.0f);
 
         // 类别名作为 string 列表(逗号分隔), rqt 字符串参数编辑
-        declareParam<std::string>("class_names", "R1,T,F");
+        {
+            std::string class_names_def = "R1,T,F";
+            if (seed_loaded && !seed_cfg.model.classNames.empty()) {
+                std::ostringstream oss;
+                for (size_t i = 0; i < seed_cfg.model.classNames.size(); ++i) {
+                    if (i > 0) oss << ",";
+                    oss << seed_cfg.model.classNames[i];
+                }
+                class_names_def = oss.str();
+            }
+            declareParam<std::string>("class_names", class_names_def);
+        }
 
         // ---- 加载 YAML 作为初始值, 然后 ROS 参数覆盖 ----
-        if (!initCore()) {
-            RCLCPP_FATAL(this->get_logger(), "核心初始化失败");
-            return;
-        }
+        // 注意: 即使相机创建/启动失败 (例如无硬件摄像头)，也继续初始化节点。
+        // 这样可以通过 ros2 param set / ros2 param load / rqt_reconfigure 动态切换
+        // camera_type + video_path (或 usb_* 参数) 来恢复/切换输入源，无需重启节点。
+        initCore();
 
         // ---- 发布者 ----
         pub_results_    = this->create_publisher<kfs_core::msg::InferResults>("~/result", 10);
@@ -361,6 +407,10 @@ private:
         cfg.usb.height               = getParam<int>("usb_height");
         cfg.usb.fps                  = getParam<int>("usb_fps");
         cfg.usb.fourcc               = getParam<std::string>("usb_fourcc");
+        cfg.video.path               = getParam<std::string>("video_path");
+        cfg.video.loop               = getParam<bool>("video_loop");
+        cfg.video.calibration_file   = getParam<std::string>("video_calibration_file");
+        cfg.video.undistort          = getParam<bool>("video_undistort");
         cfg.model.path               = getParam<std::string>("model_path");
         cfg.model.inputSize          = getParam<int>("input_size");
         cfg.model.confThresh         = getParam<float>("conf_threshold");
@@ -412,19 +462,9 @@ private:
     bool initCore() {
         cfg_ = buildConfig();
 
-        camera_ = kfs::CameraFactory::create(cfg_);
-        if (!camera_) {
-            RCLCPP_ERROR(this->get_logger(), "相机创建失败");
-            return false;
-        }
-        if (!camera_->start()) {
-            RCLCPP_ERROR(this->get_logger(), "相机启动失败");
-            return false;
-        }
-
-        // YOLO 始终创建 (主检测)
+        // 检测器 (YOLO + 可选 weaponhead) 始终创建，即使相机暂不可用
+        // 这样节点可保持运行，支持通过 rqt/ param set 动态切换相机/视频源后恢复
         yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
-        // weaponhead_detector 松耦合附加 (与 YOLO 并行, 检测不同目标)
         if (cfg_.enableWeaponheadDetector || cfg_.detectorType == "weaponhead_detector") {
             WeaponheadDetector::Params whParams;
             whParams.blurKernel    = cfg_.weaponhead.blurKernel;
@@ -443,12 +483,30 @@ private:
             wh_detector_ = std::make_unique<WeaponheadDetector>(whParams);
         }
 
-        RCLCPP_INFO(this->get_logger(),
-                    "相机:%dx%d | 模型:%s | wh:%s | conf:%.2f iou:%.2f cuda:%d",
-                    camera_->getWidth(), camera_->getHeight(),
-                    cfg_.model.path.c_str(),
-                    (wh_detector_ ? "ON" : "OFF"),
-                    cfg_.model.confThresh, cfg_.model.iouThresh, cfg_.model.useCUDA);
+        camera_ = kfs::CameraFactory::create(cfg_);
+        if (!camera_) {
+            RCLCPP_ERROR(this->get_logger(),
+                "相机创建失败 (类型: %s)。节点将继续运行，可通过动态参数切换输入源。",
+                cfg_.cameraType.c_str());
+        } else if (!camera_->start()) {
+            RCLCPP_ERROR(this->get_logger(),
+                "相机启动失败 (类型: %s)。\n"
+                "  常见原因: 无 USB 摄像头、/dev/video0 不可用、权限不足 (需加入 video 组)。\n"
+                "  调试/验证建议 (使用视频文件代替摄像头):\n"
+                "    ros2 param set /kfs_infer_node camera_type video\n"
+                "    ros2 param set /kfs_infer_node video_path kfs_core/assets/001.mp4\n"
+                "  启动时指定: ros2 run kfs_core kfs_infer_node --ros-args -p camera_type:=video",
+                cfg_.cameraType.c_str());
+            camera_.reset();
+        } else {
+            RCLCPP_INFO(this->get_logger(),
+                        "相机:%dx%d | 模型:%s | wh:%s | conf:%.2f iou:%.2f cuda:%d",
+                        camera_->getWidth(), camera_->getHeight(),
+                        cfg_.model.path.c_str(),
+                        (wh_detector_ ? "ON" : "OFF"),
+                        cfg_.model.confThresh, cfg_.model.iouThresh, cfg_.model.useCUDA);
+        }
+
         return true;
     }
 
@@ -469,7 +527,9 @@ private:
                 needRebuildDetector = true;
             }
             if (n == "camera_type" || n == "usb_device" || n == "usb_width" ||
-                n == "usb_height" || n == "usb_fps" || n == "usb_fourcc") {
+                n == "usb_height" || n == "usb_fps" || n == "usb_fourcc" ||
+                n == "video_path" || n == "video_loop" || n == "video_calibration_file" ||
+                n == "video_undistort") {
                 needRebuildCamera = true;
             }
             if (n == "detector_type" || n == "enable_weaponhead" || n == "config_path" ||
@@ -494,11 +554,14 @@ private:
             if (camera_) camera_->stop();
             camera_.reset();
             camera_ = kfs::CameraFactory::create(cfg_);
-            if (camera_) {
-                camera_->start();
+            if (camera_ && camera_->start()) {
                 RCLCPP_INFO(this->get_logger(), "相机已重载: %dx%d",
                             camera_->getWidth(), camera_->getHeight());
             } else {
+                if (camera_) {
+                    RCLCPP_ERROR(this->get_logger(), "相机重载启动失败 (类型: %s)", cfg_.cameraType.c_str());
+                    camera_.reset();
+                }
                 result.successful = false;
                 result.reason = "相机重建失败";
             }

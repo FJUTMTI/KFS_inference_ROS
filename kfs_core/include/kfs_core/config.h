@@ -21,6 +21,14 @@ struct USBConfig {
     bool        undistort = false;      // 是否对 getFrame() 返回的图像做畸变矫正 (需要 calibration_file)
 };
 
+/// 视频文件输入配置 (用于 camera.type == "video" 调试模式, 代替 USB/RealSense)
+struct VideoConfig {
+    std::string path = "";           // 视频文件路径, e.g. "kfs_core/assets/001.mp4"
+    bool        loop = true;         // 播放到末尾是否循环 (调试推荐 true)
+    std::string calibration_file = "";  // 可选, 与 usb 同格式的 ost.yaml
+    bool        undistort = false;      // 是否对帧做畸变矫正
+};
+
 /// V4L2 控制参数 (值 < 0 表示不设置)
 struct CameraControlsConfig {
     int autoExposure = -1;         // -1=自动, 0=自动光圈优先, 1=手动
@@ -72,8 +80,9 @@ struct WeaponheadConfig {
 // ============================================================
 
 struct Config {
-    std::string          cameraType = "usb";   // "usb" | "realsense"
+    std::string          cameraType = "usb";   // "usb" | "realsense" | "video"
     USBConfig            usb;
+    VideoConfig          video;
     CameraControlsConfig controls;
     ModelConfig          model;
     DisplayConfig        display;

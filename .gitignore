@@ -19,6 +19,9 @@ log/
 # Python
 __pycache__/
 
+# 视频文件 (大文件，用 Git LFS 或单独存储)
+*.mp4
+
 #dataset
 kfs_core/assets/yolo_dataset/
 kfs_core/assets/yolo_dataset_yolo/

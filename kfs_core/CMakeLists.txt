@@ -108,6 +108,7 @@ endif()
 # ============================================================
 set(KFS_CORE_SOURCES
     src/yolo_detector.cpp
+    src/lightbar_detector.cpp
     src/usb_capture.cpp
     src/config.cpp
     src/camera_factory.cpp
@@ -115,6 +116,7 @@ set(KFS_CORE_SOURCES
 
 set(KFS_CORE_HEADERS
     include/yolo_detector.h
+    include/lightbar_detector.h
     include/usb_capture.h
     include/kfs_core/icamera_capture.h
     include/kfs_core/config.h
@@ -224,9 +226,9 @@ endif()
 # ============================================================
 message(STATUS "")
 message(STATUS "========================================")
-message(STATUS "  KFS 目标检测 (YOLO + weaponhead_detector)")
-message(STATUS "  类别: R1 / T / F")
+message(STATUS "  KFS 目标检测 (YOLO + lightbar_detector)")
+message(STATUS "  类别: R1 / T / F + LIGHTBAR_{RED,GREEN,BLUE,YELLOW}")
 message(STATUS "  RealSense: $<IF:$<BOOL:${realsense2_FOUND}>,ON,OFF>")
 message(STATUS "========================================")
-message(STATUS "  运行测试: build/kfs_core/kfs_detect --image kfs_detector/assets")
+message(STATUS "  灯条测试: build/kfs_core/kfs_detect --config kfs_core/config/kfs_config.yaml --image kfs_core/assets/lightbar")
 message(STATUS "========================================")

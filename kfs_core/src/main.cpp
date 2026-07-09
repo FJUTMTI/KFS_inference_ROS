@@ -18,6 +18,7 @@
 #include "kfs_core/camera_factory.h"
 #include "kfs_core/icamera_capture.h"
 #include "yolo_detector.h"
+#include "lightbar_detector.h"
 #include "usb_capture.h"       // USBCapture::listDevices / listResolutions (静态方法)
 
 #include <opencv2/highgui.hpp>
@@ -160,6 +161,27 @@ static void drawDebug(cv::Mat& frame, const FrameResult& result, double fps,
             int mid_y = (static_cast<int>(std::round(det.corner_tl.y)) + static_cast<int>(std::round(det.corner_br.y))) / 2;
             cv::line(frame, cv::Point(left, mid_y), cv::Point(right, mid_y), cv::Scalar(0, 255, 0), 1);
         }
+
+        // 灯条: 用对应颜色画中心十字 + 强调框
+        if (det.class_name.rfind("LIGHTBAR_", 0) == 0) {
+            cv::Scalar lbColor = color;
+            if (det.class_name == "LIGHTBAR_RED")         lbColor = cv::Scalar(0, 0, 255);
+            else if (det.class_name == "LIGHTBAR_GREEN")  lbColor = cv::Scalar(0, 255, 0);
+            else if (det.class_name == "LIGHTBAR_BLUE")   lbColor = cv::Scalar(255, 0, 0);
+            else if (det.class_name == "LIGHTBAR_YELLOW") lbColor = cv::Scalar(0, 255, 255);
+
+            int cx = static_cast<int>((det.corner_tl.x + det.corner_br.x) * 0.5f);
+            int cy = static_cast<int>((det.corner_tl.y + det.corner_br.y) * 0.5f);
+            cv::drawMarker(frame, cv::Point(cx, cy), lbColor, cv::MARKER_CROSS, 24, 2);
+            // 覆盖一遍更粗的框
+            std::vector<cv::Point> corners = {
+                cv::Point(static_cast<int>(det.corner_tl.x), static_cast<int>(det.corner_tl.y)),
+                cv::Point(static_cast<int>(det.corner_tr.x), static_cast<int>(det.corner_tr.y)),
+                cv::Point(static_cast<int>(det.corner_br.x), static_cast<int>(det.corner_br.y)),
+                cv::Point(static_cast<int>(det.corner_bl.x), static_cast<int>(det.corner_bl.y)),
+            };
+            cv::polylines(frame, corners, true, lbColor, 3);
+        }
     }
 
     // 左上角状态信息
@@ -232,7 +254,7 @@ int main(int argc, char** argv) {
 
     // 解析命令行
     // 默认使用新结构下的路径 (从工作空间根目录运行时有效)
-    std::string configPath = "kfs_detector/config/kfs_config.yaml";
+    std::string configPath = "kfs_core/config/kfs_config.yaml";
     std::string testImagePath;
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -276,19 +298,86 @@ int main(int argc, char** argv) {
     // 加载 YAML 配置 (来自 kfs_core)
     kfs::Config cfg = kfs::loadConfig(configPath);
     std::cout << "[CONFIG] 已加载: " << configPath
-              << " | detector: " << cfg.detectorType << std::endl;
+              << " | detector: " << cfg.detectorType
+              << " | lightbar: " << (cfg.enableLightbarDetector ? "ON" : "OFF")
+              << std::endl;
+
+    // 图片目录若为 lightbar 资产且未显式开灯条, 自动启用 lightbar-only 方便测试
+    if (!testImagePath.empty()) {
+        std::string path_lower = testImagePath;
+        std::transform(path_lower.begin(), path_lower.end(), path_lower.begin(), ::tolower);
+        if (path_lower.find("lightbar") != std::string::npos &&
+            !cfg.enableLightbarDetector && cfg.detectorType != "lightbar") {
+            std::cout << "[INFO] 检测到 lightbar 测试路径, 自动启用 detector=lightbar\n";
+            cfg.detectorType = "lightbar";
+            cfg.enableLightbarDetector = true;
+            cfg.lightbar.enabled = true;
+            cfg.lightbar.saveDebugMask = true;
+        }
+    }
 
     std::cout << "╔══════════════════════════════════════════╗\n";
     std::cout << "║   KFS 目标检测 — CLI Demo                ║\n";
     std::cout << "╚══════════════════════════════════════════╝\n\n";
 
-    // 1) YOLO 始终加载
-    std::unique_ptr<YoloDetector> yolo_det = std::make_unique<YoloDetector>(cfg.model);
-    std::cout << "[INFO] 模型类别: ";
-    for (const auto& name : yolo_det->classNames()) {
-        std::cout << name << " ";
+    // 1) 按 detectorType 加载检测器
+    //    lightbar       → 仅灯条 (不加载 ONNX)
+    //    yolo / 默认    → YOLO; enable_lightbar 时可并行灯条
+    //    yolo_lightbar  → YOLO + 灯条
+    const bool use_yolo =
+        (cfg.detectorType != "lightbar");
+    const bool use_lightbar =
+        cfg.enableLightbarDetector || cfg.detectorType == "lightbar"
+        || cfg.detectorType == "yolo_lightbar";
+
+    std::unique_ptr<YoloDetector> yolo_det;
+    std::unique_ptr<LightbarDetector> lightbar_det;
+
+    if (use_yolo) {
+        try {
+            yolo_det = std::make_unique<YoloDetector>(cfg.model);
+            std::cout << "[INFO] YOLO 类别: ";
+            for (const auto& name : yolo_det->classNames()) {
+                std::cout << name << " ";
+            }
+            std::cout << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[WARN] YOLO 加载失败: " << e.what() << std::endl;
+            if (!use_lightbar) return 1;
+        }
     }
-    std::cout << std::endl;
+    if (use_lightbar) {
+        lightbar_det = std::make_unique<LightbarDetector>(cfg.lightbar);
+        std::cout << "[INFO] 灯条检测: ON (RED/GREEN/BLUE/YELLOW)" << std::endl;
+    }
+    if (!yolo_det && !lightbar_det) {
+        std::cerr << "[ERROR] 无可用检测器\n";
+        return 1;
+    }
+
+    // 合并 YOLO + 灯条结果
+    auto runDetectors = [&](const cv::Mat& frame) -> FrameResult {
+        FrameResult result;
+        result.frame_size = frame.size();
+        result.inference_ms = 0.0;
+        if (yolo_det) {
+            result = yolo_det->detect(frame);
+        }
+        if (lightbar_det) {
+            auto lb = lightbar_det->detect(frame);
+            for (auto& d : lb.detections) {
+                result.detections.push_back(std::move(d));
+            }
+            result.inference_ms += lb.inference_ms;
+            if (!lb.debug_image.empty()) {
+                result.debug_image = lb.debug_image;
+            }
+            if (result.frame_size.empty()) {
+                result.frame_size = lb.frame_size;
+            }
+        }
+        return result;
+    };
 
     // 2) 创建相机 (通过 CameraFactory, 返回 ICameraCapture 接口)
     std::string windowName;
@@ -324,21 +413,56 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(test_dir);
         std::cout << "[INFO] 图片测试模式: " << image_paths.size() << " 张图 → " << test_dir << std::endl;
 
+        int ok_count = 0;
         for (const auto& img_path : image_paths) {
             cv::Mat frame = cv::imread(img_path);
             if (frame.empty()) { continue; }
-            FrameResult result;
-            if (yolo_det) { result = yolo_det->detect(frame); }
-            std::cout << "  文件: " << img_path << "  detections=" << result.detections.size()
-                      << "  ms=" << result.inference_ms << "\n";
+            FrameResult result = runDetectors(frame);
+
+            std::string labels;
+            for (const auto& d : result.detections) {
+                if (!labels.empty()) labels += ",";
+                labels += d.class_name;
+            }
+            // 若路径名含颜色, 做简易准确率统计
+            std::string stem = std::filesystem::path(img_path).stem().string();
+            std::string stem_lower = stem;
+            std::transform(stem_lower.begin(), stem_lower.end(), stem_lower.begin(), ::tolower);
+            std::string expected;
+            for (const char* c : {"red", "green", "blue", "yellow"}) {
+                if (stem_lower.find(c) != std::string::npos) { expected = c; break; }
+            }
+            bool match = false;
+            if (!expected.empty()) {
+                std::string exp_cls = "LIGHTBAR_";
+                if (expected == "red") exp_cls += "RED";
+                else if (expected == "green") exp_cls += "GREEN";
+                else if (expected == "blue") exp_cls += "BLUE";
+                else if (expected == "yellow") exp_cls += "YELLOW";
+                for (const auto& d : result.detections) {
+                    if (d.class_name == exp_cls) { match = true; break; }
+                }
+                if (match) ++ok_count;
+            }
+
+            std::cout << "  文件: " << stem
+                      << "  dets=[" << labels << "]"
+                      << "  ms=" << std::fixed << std::setprecision(1) << result.inference_ms
+                      << (expected.empty() ? "" : (match ? "  OK" : "  FAIL"))
+                      << "\n";
 
             cv::Mat marked = frame.clone();
             drawDebug(marked, result, 0.0, DetectMode::SINGLE_SHOT);
-            std::string base = std::filesystem::path(img_path).stem().string();
-            std::string out_path = test_dir + "/" + base + "_marked.png";
+            std::string out_path = test_dir + "/" + stem + "_marked.png";
             cv::imwrite(out_path, marked);
+            if (!result.debug_image.empty()) {
+                cv::imwrite(test_dir + "/" + stem + "_mask.png", result.debug_image);
+            }
         }
 
+        if (!image_paths.empty() && use_lightbar) {
+            std::cout << "\n[INFO] 灯条颜色命中: " << ok_count << " / " << image_paths.size() << "\n";
+        }
         if (cfg.display.debug) { cv::destroyAllWindows(); }
         std::cout << "\n[INFO] 测试完成 → " << test_dir << "\n";
         return 0;
@@ -402,9 +526,7 @@ int main(int argc, char** argv) {
                          || (detectMode == DetectMode::SINGLE_SHOT);
 
         if (shouldDetect) {
-            if (yolo_det) {
-                lastResult = yolo_det->detect(frame);
-            }
+            lastResult = runDetectors(frame);
             if (detectMode == DetectMode::SINGLE_SHOT) {
                 detectMode = DetectMode::IDLE;
             }

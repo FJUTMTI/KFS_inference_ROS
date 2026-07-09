@@ -26,3 +26,4 @@ __pycache__/
 kfs_core/assets/yolo_dataset/
 kfs_core/assets/yolo_dataset_yolo/
 kfs_core/assets/runs
+kfs_core/assets/lightbar*

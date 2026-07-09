@@ -35,8 +35,9 @@
  *     video_loop          — 视频循环播放
  *     video_calibration_file — 视频对应的标定文件
  *     video_undistort     — 视频帧是否做畸变矫正
- *     detector_type       — 检测器类型 (yolo / weaponhead_detector)
- *     enable_weaponhead   — 是否并行启用 weaponhead_detector (传统 CV 虚焦 weaponhead 左右边界)
+ *     detector_type       — 检测器类型 (yolo / lightbar / yolo_lightbar)
+ *     enable_weaponhead   — 是否并行启用 weaponhead YOLO
+ *     enable_lightbar     — 是否并行启用灯条检测 (传统 OpenCV)
  *     inference_enabled   — 推理使能
  */
 
@@ -44,6 +45,7 @@
 #include "kfs_core/camera_factory.h"
 #include "kfs_core/icamera_capture.h"
 #include "yolo_detector.h"
+#include "lightbar_detector.h"
 
 // ROS2
 #include <rclcpp/rclcpp.hpp>
@@ -212,8 +214,9 @@ public:
         declareParam<bool>       ("video_undistort",     seed_loaded ? seed_cfg.video.undistort : false);
         declareParam<bool>       ("inference_enabled",   true);
         declareParam<int>        ("input_size",          seed_loaded ? seed_cfg.model.inputSize : 640, 320, 1280);
-        declareParam<std::string>("detector_type",       seed_loaded ? seed_cfg.detectorType : "yolo");  // "yolo" | "weaponhead_detector"
-        declareParam<bool>       ("enable_weaponhead",   seed_loaded ? seed_cfg.enableWeaponheadDetector : true);   // 与 YOLO 并行启用 weaponhead_detector (CV 虚焦左右边界)
+        declareParam<std::string>("detector_type",       seed_loaded ? seed_cfg.detectorType : "yolo");  // "yolo" | "lightbar" | "yolo_lightbar"
+        declareParam<bool>       ("enable_weaponhead",   seed_loaded ? seed_cfg.enableWeaponheadDetector : true);
+        declareParam<bool>       ("enable_lightbar",     seed_loaded ? seed_cfg.enableLightbarDetector : false);
 
         // weaponhead YOLO 模型 (与3class并行推理)
         declareParam<std::string>("wh_model_path",       seed_loaded ? seed_cfg.weaponhead.whModelPath : "");
@@ -410,6 +413,11 @@ private:
 
         cfg.detectorType             = getParam<std::string>("detector_type");
         cfg.enableWeaponheadDetector = getParam<bool>("enable_weaponhead");
+        cfg.enableLightbarDetector   = getParam<bool>("enable_lightbar");
+        if (cfg.detectorType == "lightbar" || cfg.detectorType == "yolo_lightbar") {
+            cfg.enableLightbarDetector = true;
+        }
+        cfg.lightbar.enabled = cfg.enableLightbarDetector;
 
         // weaponhead ROS 参数覆盖 (优先于 YAML)
         cfg.weaponhead.whModelPath      = getParam<std::string>("wh_model_path");
@@ -441,16 +449,7 @@ private:
         cfg_ = buildConfig();
 
         // 检测器始终创建，即使相机暂不可用
-        yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
-        // weaponhead YOLO 模型 (与3class并行)
-        if (!cfg_.weaponhead.whModelPath.empty()) {
-            std::vector<std::string> whClasses = {"WEAPONHEAD"};
-            wh_yolo_detector_ = std::make_unique<YoloDetector>(
-                cfg_.weaponhead.whModelPath, whClasses,
-                cfg_.model.inputSize,
-                cfg_.model.confThresh, cfg_.model.iouThresh,
-                cfg_.model.useCUDA);
-        }
+        rebuildDetectors();
 
         camera_ = kfs::CameraFactory::create(cfg_);
         if (!camera_) {
@@ -469,14 +468,41 @@ private:
             camera_.reset();
         } else {
             RCLCPP_INFO(this->get_logger(),
-                        "相机:%dx%d | 模型:%s | whYOLO:%s | conf:%.2f iou:%.2f cuda:%d",
+                        "相机:%dx%d | YOLO:%s | whYOLO:%s | lightbar:%s | conf:%.2f iou:%.2f cuda:%d",
                         camera_->getWidth(), camera_->getHeight(),
-                        cfg_.model.path.c_str(),
+                        (yolo_detector_ ? cfg_.model.path.c_str() : "OFF"),
                         (wh_yolo_detector_ ? "ON" : "OFF"),
+                        (lightbar_detector_ ? "ON" : "OFF"),
                         cfg_.model.confThresh, cfg_.model.iouThresh, cfg_.model.useCUDA);
         }
 
         return true;
+    }
+
+    void rebuildDetectors() {
+        yolo_detector_.reset();
+        wh_yolo_detector_.reset();
+        lightbar_detector_.reset();
+
+        const bool use_yolo = (cfg_.detectorType != "lightbar");
+        const bool use_lightbar = cfg_.enableLightbarDetector
+            || cfg_.detectorType == "lightbar"
+            || cfg_.detectorType == "yolo_lightbar";
+
+        if (use_yolo) {
+            yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
+            if (!cfg_.weaponhead.whModelPath.empty()) {
+                std::vector<std::string> whClasses = {"WEAPONHEAD"};
+                wh_yolo_detector_ = std::make_unique<YoloDetector>(
+                    cfg_.weaponhead.whModelPath, whClasses,
+                    cfg_.model.inputSize,
+                    cfg_.model.confThresh, cfg_.model.iouThresh,
+                    cfg_.model.useCUDA);
+            }
+        }
+        if (use_lightbar) {
+            lightbar_detector_ = std::make_unique<LightbarDetector>(cfg_.lightbar);
+        }
     }
 
     // ----------------------------------------------------------
@@ -502,7 +528,8 @@ private:
                 n == "video_undistort") {
                 needRebuildCamera = true;
             }
-            if (n == "detector_type" || n == "enable_weaponhead" || n == "config_path") {
+            if (n == "detector_type" || n == "enable_weaponhead" || n == "enable_lightbar"
+                || n == "config_path") {
                 needRebuildDetector = true;
             }
             if (n == "inference_enabled") {
@@ -536,24 +563,17 @@ private:
             }
         }
 
-        // 重建检测器 (YOLO + 可选 weaponhead_detector 松耦合并行)
+        // 重建检测器 (YOLO + 可选 weaponhead / lightbar)
         if (needRebuildDetector) {
             std::lock_guard<std::mutex> lock(mtx_);
             if (!needRebuildCamera) cfg_ = buildConfig();
-            yolo_detector_.reset();
-            wh_yolo_detector_.reset();
             try {
-                yolo_detector_ = std::make_unique<YoloDetector>(cfg_.model);
-                if (!cfg_.weaponhead.whModelPath.empty()) {
-                    std::vector<std::string> whClasses = {"WEAPONHEAD"};
-                    wh_yolo_detector_ = std::make_unique<YoloDetector>(
-                        cfg_.weaponhead.whModelPath, whClasses,
-                        cfg_.model.inputSize, cfg_.model.confThresh, cfg_.model.iouThresh,
-                        cfg_.model.useCUDA);
-                }
+                rebuildDetectors();
                 RCLCPP_INFO(this->get_logger(),
-                            "检测器已重载 | whYOLO:%s | conf:%.2f iou:%.2f cuda:%d",
+                            "检测器已重载 | YOLO:%s | whYOLO:%s | lightbar:%s | conf:%.2f iou:%.2f cuda:%d",
+                            (yolo_detector_ ? "ON" : "OFF"),
                             (wh_yolo_detector_ ? "ON" : "OFF"),
+                            (lightbar_detector_ ? "ON" : "OFF"),
                             cfg_.model.confThresh, cfg_.model.iouThresh,
                             cfg_.model.useCUDA);
             } catch (const std::exception& e) {
@@ -600,6 +620,13 @@ private:
                     result.detections.push_back(std::move(d));
                 }
                 result.inference_ms += why_res.inference_ms;
+            }
+            if (lightbar_detector_) {
+                auto lb_res = lightbar_detector_->detect(frame);
+                for (auto& d : lb_res.detections) {
+                    result.detections.push_back(std::move(d));
+                }
+                result.inference_ms += lb_res.inference_ms;
             }
             did_inference = true;
         }
@@ -710,9 +737,10 @@ private:
     // ---- 核心 ----
     kfs::Config                          cfg_;
     std::unique_ptr<kfs::ICameraCapture> camera_;
-    // 检测器: YOLO 3class + weaponhead YOLO 并行
+    // 检测器: YOLO 3class + weaponhead YOLO + lightbar 并行
     std::unique_ptr<YoloDetector>        yolo_detector_;
     std::unique_ptr<YoloDetector>        wh_yolo_detector_;
+    std::unique_ptr<LightbarDetector>    lightbar_detector_;
 
     // ---- ROS2 ----
     rclcpp::Publisher<kfs_core::msg::InferResults>::SharedPtr  pub_results_;

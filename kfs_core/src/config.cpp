@@ -97,11 +97,17 @@ Config loadConfig(const std::string& yamlPath) {
         cfg.display.debug = yamlBool(disp, "debug", cfg.display.debug);
     }
 
-    // ---- detector (松耦合新增 weaponhead_detector 支持) ----
+    // ---- detector (松耦合: weaponhead / lightbar) ----
     if (root["detector"]) {
         auto det = root["detector"];
         cfg.detectorType = yamlStr(det, "type", cfg.detectorType);
         cfg.enableWeaponheadDetector = yamlBool(det, "enable_weaponhead", cfg.enableWeaponheadDetector);
+        cfg.enableLightbarDetector   = yamlBool(det, "enable_lightbar",   cfg.enableLightbarDetector);
+    }
+
+    // detector.type 快捷开关
+    if (cfg.detectorType == "lightbar" || cfg.detectorType == "yolo_lightbar") {
+        cfg.enableLightbarDetector = true;
     }
 
     // ---- weaponhead_detector 参数 ----
@@ -111,6 +117,38 @@ Config loadConfig(const std::string& yamlPath) {
             cfg.enableWeaponheadDetector = wh["enabled"].as<bool>();
         }
         cfg.weaponhead.whModelPath      = yamlStr(wh, "wh_model_path",     cfg.weaponhead.whModelPath);
+    }
+
+    // ---- lightbar_detector 参数 ----
+    if (root["lightbar_detector"]) {
+        auto lb = root["lightbar_detector"];
+        if (lb["enabled"]) {
+            cfg.enableLightbarDetector = lb["enabled"].as<bool>();
+            cfg.lightbar.enabled = cfg.enableLightbarDetector;
+        }
+        cfg.lightbar.corePercentile  = yamlFloat(lb, "core_percentile",   cfg.lightbar.corePercentile);
+        cfg.lightbar.coreThreshMin   = yamlInt  (lb, "core_thresh_min",   cfg.lightbar.coreThreshMin);
+        cfg.lightbar.coreThreshMax   = yamlInt  (lb, "core_thresh_max",   cfg.lightbar.coreThreshMax);
+        cfg.lightbar.coreThreshScale = yamlFloat(lb, "core_thresh_scale", cfg.lightbar.coreThreshScale);
+        cfg.lightbar.maxCoreFrac     = yamlFloat(lb, "max_core_frac",     cfg.lightbar.maxCoreFrac);
+        cfg.lightbar.maxShortSide    = yamlFloat(lb, "max_short_side",    cfg.lightbar.maxShortSide);
+        cfg.lightbar.openKsize       = yamlInt  (lb, "open_ksize",        cfg.lightbar.openKsize);
+        cfg.lightbar.closeLength     = yamlInt  (lb, "close_length",      cfg.lightbar.closeLength);
+        cfg.lightbar.closeVertical   = yamlInt  (lb, "close_vertical",    cfg.lightbar.closeVertical);
+        // 兼容: close_vertical 旧字段覆盖 close_length
+        if (lb["close_vertical"] && !lb["close_length"]) {
+            cfg.lightbar.closeLength = cfg.lightbar.closeVertical;
+        }
+        cfg.lightbar.minLength       = yamlFloat(lb, "min_length",        cfg.lightbar.minLength);
+        cfg.lightbar.minAspect       = yamlFloat(lb, "min_aspect",        cfg.lightbar.minAspect);
+        cfg.lightbar.minArea         = yamlFloat(lb, "min_area",          cfg.lightbar.minArea);
+        cfg.lightbar.minLengthRatio  = yamlFloat(lb, "min_length_ratio",  cfg.lightbar.minLengthRatio);
+        cfg.lightbar.maxAngleDiff    = yamlFloat(lb, "max_angle_diff",    cfg.lightbar.maxAngleDiff);
+        cfg.lightbar.bloomKsize      = yamlInt  (lb, "bloom_ksize",       cfg.lightbar.bloomKsize);
+        cfg.lightbar.minColorScore   = yamlFloat(lb, "min_color_score",   cfg.lightbar.minColorScore);
+        cfg.lightbar.saveDebugMask   = yamlBool (lb, "save_debug_mask",   cfg.lightbar.saveDebugMask);
+    } else {
+        cfg.lightbar.enabled = cfg.enableLightbarDetector;
     }
 
     return cfg;

@@ -6,7 +6,7 @@ camera:
   # --- 视频文件模式 (调试/效果验证, 代替摄像头) ---
   # 将 type 改为 "video" 并配置 video 子项即可使用本地 mp4 作为输入流 (支持循环播放)
   video:
-    path: "kfs_core/assets/002.mp4"
+    path: "kfs_core/assets/005.mp4"
     loop: true
     calibration_file: "kfs_core/config/ost.yaml"  # 可选, 复用标定
     undistort: true
@@ -40,10 +40,15 @@ display:
 
 # ============================================================
 # 检测器类型 (松耦合添加，不影响 YOLO 主流程)
+# type: yolo | lightbar | yolo_lightbar
+#   yolo          — 仅 YOLO
+#   lightbar      — 仅灯条 (不加载 ONNX, 适合 assets/lightbar 测试)
+#   yolo_lightbar — YOLO + 灯条并行
 # ============================================================
 detector:
   type: yolo
-  enable_weaponhead: true  # 是否启用 weaponhead_detector (传统 OpenCV)
+  enable_weaponhead: true  # 是否启用 weaponhead_detector
+  enable_lightbar: false   # 是否启用灯条检测 (type=lightbar/yolo_lightbar 时自动 true)
 
 # ============================================================
 # weaponhead YOLO 模型 (与3class并行推理)
@@ -51,4 +56,35 @@ detector:
 weaponhead_detector:
   enabled: true
   # YOLO 模型路径 (与3class并行推理, 空字符串=不使用)
-  wh_model_path: "kfs_core/models/kfs_weaponhead_v1.onnx"
+  wh_model_path: "kfs_core/models/whv4.onnx"
+
+# ============================================================
+# 灯条检测器 (传统 OpenCV: 高亮核心 + 形态学 + bloom 通道差)
+# 测试: ./kfs_detect --config kfs_core/config/kfs_config.yaml \
+#          --image kfs_core/assets/lightbar
+# 将 detector.type 设为 lightbar 后无需 YOLO 模型
+# ============================================================
+lightbar_detector:
+  enabled: true
+  # 高亮灯芯 (过胖 bloom 如黄灯会自动抬阈值)
+  core_percentile: 99.8
+  core_thresh_min: 200
+  core_thresh_max: 235
+  core_thresh_scale: 0.90
+  max_core_frac: 0.015      # 核心占画面比例上限
+  max_short_side: 65.0      # 段短边上限, 拒绝 bloom 胖块
+  # 形态学 (多方向 0/45/90/135 线状闭运算)
+  open_ksize: 3
+  close_length: 15
+  # 细长段
+  min_length: 50.0
+  min_aspect: 3.5
+  min_area: 50.0
+  # 等长共线配对 (长轴投影, 支持任意旋转)
+  min_length_ratio: 0.55
+  max_angle_diff: 18.0
+  # 颜色外环 (HSV + 通道差)
+  bloom_ksize: 41
+  min_color_score: 5.0
+  # 调试掩膜写入 FrameResult.debug_image
+  save_debug_mask: true

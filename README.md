@@ -4,18 +4,20 @@
 [![C++17](https://img.shields.io/badge/C++-17-00599C.svg)](https://en.cppreference.com/w/cpp/17)
 [![CUDA](https://img.shields.io/badge/CUDA-✓-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![ONNX Runtime](https://img.shields.io/badge/ONNX_Runtime-1.19-4C4C4C.svg)](https://onnxruntime.ai/)
+[![OpenCV](https://img.shields.io/badge/OpenCV-4.x-5C3EE8.svg)](https://opencv.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-> **CURC ROBCON 2026 "武林探秘" 实时视觉算法系统**
+> **CURC ROBCON 2026「武林探秘」实时视觉算法系统**
 
-本仓库包含 ROBCON 2026 比赛的两套核心视觉识别功能：
+本仓库 `kfs_core` 提供比赛所需的视觉识别能力，统一封装相机采集、配置加载、检测器与 ROS2 节点。
 
-| 功能 | 模型 | 用途 |
+| 功能 | 实现 | 用途 |
 |------|------|------|
-| 🏷️ **功夫卷轴识别** | `kfs_yolo11_3class.onnx` | 识别赛场上的功夫卷轴类别 (R1 / T / F) |
-| ⚔️ **武器头识别** | `kfs_weaponhead_v1.onnx` | 识别武器头顶端区域，输出左右边界像素坐标 |
+| 🏷️ **功夫卷轴识别** | YOLO11 ONNX (`kfs_yolo11_3class.onnx`) | 识别赛场卷轴类别 R1 / T / F |
+| ⚔️ **武器头识别** | YOLO ONNX (`whv4.onnx` 等) | 识别武器头顶端，输出边界框 |
+| 💡 **灯条颜色识别** | 传统 OpenCV (`LightbarDetector`) | 识别中央共线双段 LED 灯条颜色 (红/绿/蓝/黄) |
 
-两套模型通过 **双 YOLO 并行推理** 同时运行，每帧整合为统一结果。
+检测器可单独或并行运行：YOLO 与灯条结果合并到同一帧 `FrameResult` / `InferResults`。
 
 ---
 
@@ -24,12 +26,14 @@
 | 特性 | 说明 |
 |------|------|
 | 🎯 推理后端 | ONNX Runtime (CUDA / CPU 自动切换) |
-| ⚡ 推理性能 | CUDA ≈ 8~15ms / CPU ≈ 25~50ms (640×640) |
-| 🔀 双模型并行 | 3class 卷轴模型 + weaponhead 武器头模型同时推理，合并发布 |
-| 📷 相机支持 | Intel RealSense D415/D435 / V4L2 USB 摄像头 / 本地视频文件 |
-| 🤖 ROS2 接口 | 自定义 msg/srv + rqt_reconfigure 动态参数调节 |
-| 🧩 模块化设计 | `libkfs_core` 共享库，可被任意 ROS2 节点链接 |
-| 📐 畸变矫正 | 支持 USB/Video 相机标定 + 在线去畸变 |
+| ⚡ 推理性能 | YOLO CUDA ≈ 8~15ms；灯条 OpenCV ≈ 50~200ms (1900×2532 全图) |
+| 🔀 多检测器并行 | 3class 卷轴 + weaponhead + 灯条可同时运行并合并发布 |
+| 📷 相机支持 | Intel RealSense D415/D435 / V4L2 USB / 本地视频文件 |
+| 🖼️ 离线测图 | CLI `--image` 支持单图或目录批量测试（灯条样例见 `assets/lightbar`） |
+| 🤖 ROS2 接口 | 自定义 msg/srv + rqt_reconfigure 动态参数 |
+| 🧩 模块化 | `libkfs_core_lib` 共享库，可被任意节点链接 |
+| 📐 畸变矫正 | USB/Video 支持 `ost.yaml` 标定 + 在线去畸变 |
+| ⚙️ 全配置驱动 | 相机类型、检测器开关、阈值等均由 YAML / ROS 参数控制 |
 
 ---
 
@@ -47,60 +51,72 @@
 
 | ID | 名称 | 说明 |
 |----|------|------|
-| 0 | weaponhead | 武器头顶端区域，结果中包含 `corner_tl.x` / `corner_br.x` 即左右边界像素 |
+| 99 | WEAPONHEAD | 与 3class 并行时统一为 class_id=99，避免 ID 冲突 |
 
-> 全部类别名可通过 YAML 配置或 ROS2 参数动态修改。
+### 灯条 (OpenCV 传统视觉)
+
+| ID | 名称 | 说明 |
+|----|------|------|
+| 10 | LIGHTBAR_RED | 红色双段共线 LED |
+| 11 | LIGHTBAR_GREEN | 绿色 |
+| 12 | LIGHTBAR_BLUE | 蓝色 |
+| 13 | LIGHTBAR_YELLOW | 黄色 |
+| 19 | LIGHTBAR_UNKNOWN | 几何配对成功但颜色不确定 |
+
+输出为**旋转矩形四角**（`corner_tl/tr/br/bl`），覆盖两段等长共线灯条（支持任意倾斜角度）。
 
 ---
 
 ## 算法结构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   kfs_infer_node                    │
-│                                                     │
-│  ┌─────────────┐  ┌──────────────────────────────┐  │
-│  │ ICameraCapture│  │ frame                       │  │
-│  │  · USBCapture │──▶│  ┌──────────────────────┐  │  │
-│  │  · RealSense  │  │  │ YoloDetector (3class) │  │  │
-│  │  · VideoFile  │  │  │  · kfs_yolo11_3class  │  │  │
-│  └─────────────┘  │  │  · 卷轴 R1 / T / F     │  │  │
-│                    │  └──────────┬─────────────┘  │  │
-│                    │             │ detections[]    │  │
-│                    │  ┌──────────▼─────────────┐  │  │
-│                    │  │ YoloDetector (weaponhd)│  │  │
-│                    │  │  · kfs_weaponhead_v1   │  │  │
-│                    │  │  · 武器头 左右边界     │  │  │
-│                    │  └──────────┬─────────────┘  │  │
-│                    │             │ detections[]    │  │
-│                    │  ┌──────────▼─────────────┐  │  │
-│                    │  │    合并 → FrameResult   │  │  │
-│                    │  └──────────┬─────────────┘  │  │
-│                    └─────────────┼────────────────┘  │
-│                                  │                    │
-│  ┌───────────────────────────────▼────────────────┐  │
-│  │              ROS2 通信接口                      │  │
-│  │  [Pub]  ~/result       InferResults (数组)     │  │
-│  │  [Pub]  ~/debug_image  sensor_msgs/Image       │  │
-│  │  [Pub]  ~/status       std_msgs/String         │  │
-│  │  [Sub]  ~/enable       std_msgs/Bool           │  │
-│  │  [Srv]  ~/set_state    SetInferState           │  │
-│  │  [Srv]  ~/trigger      std_srvs/Trigger        │  │
-│  │  [Param]  rqt_reconfigure 动态参数             │  │
-│  └────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                      kfs_infer_node / kfs_detect             │
+│                                                              │
+│  ┌────────────────┐     frame                                │
+│  │ ICameraCapture │──────────────────────────────────┐       │
+│  │  · USBCapture  │                                  │       │
+│  │  · RealSense   │   ┌──────────────────────────────▼────┐  │
+│  │  · VideoFile   │   │  YoloDetector (3class)  [可选]     │  │
+│  └────────────────┘   │  · R1 / T / F                      │  │
+│                       ├────────────────────────────────────┤  │
+│                       │  YoloDetector (weaponhead) [可选]  │  │
+│                       │  · WEAPONHEAD                      │  │
+│                       ├────────────────────────────────────┤  │
+│                       │  LightbarDetector (OpenCV) [可选]  │  │
+│                       │  · 高亮灯芯 + 形态学 + 共线配对    │  │
+│                       │  · 外环 HSV / 通道差 → 颜色        │  │
+│                       └──────────────────┬─────────────────┘  │
+│                                          │ 合并 FrameResult    │
+│  ┌───────────────────────────────────────▼─────────────────┐  │
+│  │ ROS2: ~/result  ~/debug_image  ~/status  服务/参数        │  │
+│  └─────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+### 灯条检测流程
+
+1. **自适应高亮阈值**：从灰度高分位起搜 thr；黄灯等大面积 bloom 自动抬高阈值，压成干净灯芯  
+2. **多方向形态学**：开运算去噪 + 0°/45°/90°/135° 线状闭运算，适配斜向 LED 间隙  
+3. **细长段过滤**：长宽比、短边上限，拒绝 bloom 胖块  
+4. **等长共线配对**：按长轴单位向量分解 `along` / `lateral`，支持旋转共线（非仅竖直）  
+5. **颜色判定**：段外环 HSV 峰值 + 通道差（红/绿/蓝/黄消歧）  
+6. **输出**：两段合并的旋转矩形 + `LIGHTBAR_*` 类别
+
+测试样例：`kfs_core/assets/lightbar/`（红/绿/蓝/黄共 24 张）。  
+标注/掩膜参考：`kfs_core/assets/lightbar_debug/`。
 
 ### ROS2 消息
 
 | 话题/服务 | 类型 | 方向 | 说明 |
 |-----------|------|------|------|
-| `~/result` | `kfs_core/InferResults` | 发布 | 每帧所有检测结果（含 `inference_ms`、帧尺寸元信息），推荐下游订阅此话题 |
-| `~/debug_image` | `sensor_msgs/Image` | 发布 | 标注后的调试画面（rqt/rviz 可视化） |
-| `~/status` | `std_msgs/String` | 发布 | 运行状态文本 |
-| `~/enable` | `std_msgs/Bool` | 订阅 | 控制是否执行推理 |
+| `~/result` | `kfs_core/InferResults` | 发布 | 一帧全部检测（含 `inference_ms`、帧尺寸） |
+| `~/debug_image` | `sensor_msgs/Image` | 发布 | 标注调试画面 |
+| `~/status` | `std_msgs/String` | 发布 | 状态文本 |
+| `~/enable` | `std_msgs/Bool` | 订阅 | 推理使能 |
 | `~/set_state` | `kfs_core/SetInferState` | 服务 | 显式启停推理 |
 | `~/trigger` | `std_srvs/Trigger` | 服务 | 触发单次推理 |
+| `~/snapshot` | `std_srvs/Trigger` | 服务 | 保存当前帧截图 |
 
 ---
 
@@ -108,176 +124,195 @@
 
 ### 系统依赖
 
-| 依赖 | 版本 | 必需 | 安装命令 |
-|------|------|------|----------|
-| ROS2 Humble | — | ✅ | [官方安装指南](https://docs.ros.org/en/humble/Installation.html) |
+| 依赖 | 版本 | 必需 | 安装 |
+|------|------|------|------|
+| ROS2 Humble | — | 节点需要 | [官方指南](https://docs.ros.org/en/humble/Installation.html) |
 | CMake | ≥ 3.16 | ✅ | `sudo apt install cmake` |
 | GCC (C++17) | ≥ 8 | ✅ | `sudo apt install build-essential` |
 | OpenCV | ≥ 4.x | ✅ | `sudo apt install libopencv-dev` |
-| ONNX Runtime | ≥ 1.16 | ✅ | 见下方安装说明 |
+| ONNX Runtime | ≥ 1.16 | ✅（仅灯条模式可无模型推理） | 见下方 |
 | yaml-cpp | — | ✅ | `sudo apt install libyaml-cpp-dev` |
 | librealsense2 | ≥ 2.50 | ❌ | `sudo apt install librealsense2-dev` |
 
-> ❌ = 可选，仅 RealSense 相机需要。USB 摄像头无需此项。
+> 仅跑灯条 CLI（`detector.type: lightbar`）时不加载 ONNX，但当前库仍链接 ONNX Runtime。
 
-### Python 依赖 (仅导出 ONNX 时需要)
-
-```bash
-pip install ultralytics onnx
-```
-
----
-
-## 一键安装
+### 一键安装依赖
 
 ```bash
-# 1. 系统依赖
 sudo apt install -y cmake build-essential libopencv-dev libyaml-cpp-dev
 
-# 2. ONNX Runtime
+# ONNX Runtime
 wget https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-linux-x64-1.19.2.tgz
 tar xzf onnxruntime-linux-x64-1.19.2.tgz
 echo 'export ONNXRUNTIME_DIR='"$(pwd)"'/onnxruntime-linux-x64-1.19.2' >> ~/.bashrc
 source ~/.bashrc
 
-# 3. (可选) RealSense D415 / D435
+# 可选 RealSense
 sudo apt install -y librealsense2-dev
-
-# 4. ROS2 Humble (如未安装)
-# 参见 https://docs.ros.org/en/humble/Installation.html
 ```
 
 ---
 
 ## 编译
 
-### colcon (推荐，ROS2 原生)
+### colcon（推荐）
 
 ```bash
-cd /home/lee/realsense_inference
-source /opt/ros/humble/setup.zsh
+cd /path/to/realsense_inference
+source /opt/ros/humble/setup.bash   # 或 setup.zsh
 colcon build --packages-select kfs_core --cmake-args -DCMAKE_BUILD_TYPE=Release
-source install/setup.zsh
+source install/setup.bash
 ```
 
-### 独立 CMake (不需要 ROS2 环境，仅编译库和 CLI)
+产物：
+
+- `install/kfs_core/lib/libkfs_core_lib.so` — 核心库  
+- `install/kfs_core/bin/kfs_detect` — CLI  
+- `install/kfs_core/lib/kfs_core/kfs_infer_node` — ROS2 节点  
+
+若运行 CLI 提示找不到 `.so`：
 
 ```bash
-cd /home/lee/realsense_inference/kfs_core
+export LD_LIBRARY_PATH="$(pwd)/install/kfs_core/lib:${LD_LIBRARY_PATH}"
+```
+
+### 独立 CMake（无 ROS2，仅库 + CLI）
+
+```bash
+cd kfs_core
 mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
-
-# 产物:
-#   libkfs_core_lib.so  — 核心共享库
-#   kfs_detect          — CLI 测试程序
-#   kfs_infer_node      — ROS2 节点 (需要 ROS2 环境)
+# 产物: libkfs_core_lib.so, kfs_detect
 ```
 
 ---
 
 ## 运行
 
+### CLI Demo
+
+在**工作空间根目录**执行（路径相对仓库根）：
+
+```bash
+export LD_LIBRARY_PATH="$(pwd)/install/kfs_core/lib:${LD_LIBRARY_PATH}"
+
+# 默认配置（相机 / 视频 + 已启用的检测器）
+./install/kfs_core/bin/kfs_detect --config kfs_core/config/kfs_config.yaml
+
+# 列出 USB 摄像头
+./install/kfs_core/bin/kfs_detect --list-cameras
+
+# 静态图片 / 目录测试
+./install/kfs_core/bin/kfs_detect \
+  --config kfs_core/config/kfs_config.yaml \
+  --image kfs_core/assets/lightbar
+```
+
+**按键（debug 窗口）：**
+
+| 键 | 功能 |
+|----|------|
+| `SPACE` | 单次推理 |
+| `D` | 切换持续推理 |
+| `S` | 截图 |
+| `Q` / `ESC` | 退出 |
+
+路径名含 `lightbar` 时，CLI 会自动切到灯条检测（无需改 YOLO 配置即可测图）。  
+批量测图结果写入 `/tmp/kfs_test_YYYYMMDD_HHMMSS/`（`*_marked.png`，可选 `*_mask.png`）。
+
+#### 仅测灯条（不加载 YOLO）
+
+在 `kfs_config.yaml` 中设置：
+
+```yaml
+detector:
+  type: lightbar          # 不加载 ONNX
+  enable_lightbar: true
+
+lightbar_detector:
+  enabled: true
+  save_debug_mask: true   # 输出核心掩膜到 debug_image
+```
+
+或并行：
+
+```yaml
+detector:
+  type: yolo_lightbar     # YOLO + 灯条
+  enable_lightbar: true
+```
+
 ### ROS2 节点
 
 ```bash
-# 启动推理节点
+source install/setup.bash
+
 ros2 run kfs_core kfs_infer_node --ros-args \
-  -p model_path:=/absolute/path/to/kfs_yolo11_3class.onnx \
-  -p config_path:=/absolute/path/to/kfs_config.yaml
+  -p config_path:=$(pwd)/kfs_core/config/kfs_config.yaml
 
-# 查看标注画面
+# 视频代替摄像头
+ros2 run kfs_core kfs_infer_node --ros-args \
+  -p camera_type:=video \
+  -p video_path:=kfs_core/assets/005.mp4
+
+# 启用灯条
+ros2 run kfs_core kfs_infer_node --ros-args \
+  -p enable_lightbar:=true \
+  -p detector_type:=yolo_lightbar
+
+# 查看结果
 rqt_image_view /kfs_infer_node/debug_image
-
-# 动态调参
-ros2 run rqt_reconfigure rqt_reconfigure
-
-# 查看检测结果（一帧一个数组消息）
 ros2 topic echo /kfs_infer_node/result --once
-
-# 保存截图
-ros2 service call /kfs_infer_node/snapshot std_srvs/srv/Trigger
+ros2 run rqt_reconfigure rqt_reconfigure
 ```
 
 ### 推理控制
 
 ```bash
-# 启停推理
 ros2 service call /kfs_infer_node/set_state kfs_core/srv/SetInferState "{enable: true}"
-ros2 service call /kfs_infer_node/set_state kfs_core/srv/SetInferState "{enable: false}"
-
-# 单次推理触发
 ros2 service call /kfs_infer_node/trigger std_srvs/srv/Trigger
+ros2 service call /kfs_infer_node/snapshot std_srvs/srv/Trigger
 ```
 
-### CLI Demo (无 ROS2 环境)
+### 主要动态参数
 
-```bash
-cd /home/lee/realsense_inference
-build/kfs_core/kfs_detect --config kfs_core/config/kfs_config.yaml
-
-# 按键:
-#   SPACE — 单次推理
-#   D     — 切换持续推理
-#   S     — 截图保存
-#   Q/ESC — 退出
-```
-
-### rqt_reconfigure 可调参数
-
-| 参数 | 类型 | 范围 | 说明 |
-|------|------|------|------|
-| `model_path` | string | — | 3class 卷轴 ONNX 模型路径 |
-| `conf_threshold` | float | 0.0~1.0 | 置信度阈值 |
-| `iou_threshold` | float | 0.0~1.0 | NMS IoU 阈值 |
-| `use_cuda` | bool | — | CUDA 推理开关 |
-| `class_names` | string | — | 逗号分隔类别名，如 `"R1,T,F"` |
-| `camera_type` | string | — | `usb` / `realsense` / `video` |
-| `debug_image` | bool | — | 是否发布标注画面 |
-| `inference_enabled` | bool | — | 推理使能 |
-| `usb_device` | int | 0~63 | USB 摄像头设备号 |
-| `usb_width` | int | 160~3840 | 分辨率宽 |
-| `usb_height` | int | 120~2160 | 分辨率高 |
-| `usb_fps` | int | 1~240 | 帧率 |
-| `video_path` | string | — | 视频文件路径 (camera_type=video 时) |
-| `video_loop` | bool | — | 视频文件循环播放 |
-| `wh_model_path` | string | — | weaponhead ONNX 模型路径（空=禁用武器头检测） |
+| 参数 | 说明 |
+|------|------|
+| `config_path` | YAML 配置路径 |
+| `camera_type` | `usb` / `realsense` / `video` |
+| `model_path` / `conf_threshold` / `iou_threshold` / `use_cuda` | 3class YOLO |
+| `wh_model_path` | weaponhead 模型（空=禁用） |
+| `detector_type` | `yolo` / `lightbar` / `yolo_lightbar` |
+| `enable_lightbar` | 是否并行灯条检测 |
+| `enable_weaponhead` | 是否启用 weaponhead 相关逻辑 |
+| `video_path` / `video_loop` | 视频输入 |
+| `usb_device` / `usb_width` / `usb_height` / `usb_fps` | USB 相机 |
+| `inference_enabled` / `debug_image` | 推理与调试图 |
 
 ---
 
 ## 配置
 
-编辑 `kfs_core/config/kfs_config.yaml`：
+主配置：`kfs_core/config/kfs_config.yaml`。
 
 ```yaml
-# ============================================================
-# KFS 视觉算法 — 全局配置
-# ============================================================
-
-# --- 相机 ---
 camera:
-  type: usb                     # "usb" | "realsense" | "video"
+  type: video                 # usb | realsense | video
+  video:
+    path: "kfs_core/assets/005.mp4"
+    loop: true
+    calibration_file: "kfs_core/config/ost.yaml"
+    undistort: true
   usb:
     device: 0
     width: 1920
     height: 1080
     fps: 30
     fourcc: "MJPG"
-    calibration_file: "kfs_core/config/ost.yaml"   # 可选，相机标定文件
-    undistort: true                                 # 是否在线去畸变
-  video:                        # camera.type=video 时生效
-    path: "kfs_core/assets/002.mp4"
-    loop: true
     calibration_file: "kfs_core/config/ost.yaml"
     undistort: true
-  controls:
-    auto_exposure: 0
-    brightness: 0
-    contrast: 50
-    saturation: 64
-    sharpness: 50
 
-# --- 功夫卷轴识别模型 ---
 model:
   path: kfs_core/models/kfs_yolo11_3class.onnx
   input_size: 640
@@ -286,66 +321,85 @@ model:
   use_cuda: true
   class_names: ["R1", "T", "F"]
 
-# --- 武器头识别模型 (与卷轴模型并行) ---
-weaponhead_detector:
-  wh_model_path: "kfs_core/models/kfs_weaponhead_v1.onnx"   # 空=禁用
+detector:
+  type: yolo                  # yolo | lightbar | yolo_lightbar
+  enable_weaponhead: true
+  enable_lightbar: false
 
-# --- 调试显示 ---
-display:
-  debug: true
+weaponhead_detector:
+  enabled: true
+  wh_model_path: "kfs_core/models/whv4.onnx"
+
+lightbar_detector:
+  enabled: false
+  # 高亮灯芯（过胖 bloom 自动抬 thr）
+  core_percentile: 99.8
+  core_thresh_min: 200
+  core_thresh_max: 235
+  core_thresh_scale: 0.90
+  max_core_frac: 0.015
+  max_short_side: 65.0
+  # 形态学
+  open_ksize: 3
+  close_length: 15
+  # 细长段 / 共线
+  min_length: 50.0
+  min_aspect: 3.5
+  min_area: 50.0
+  min_length_ratio: 0.55
+  max_angle_diff: 18.0
+  # 颜色外环
+  bloom_ksize: 41
+  min_color_score: 5.0
+  save_debug_mask: false
 ```
 
-> `camera.type: video` + `video.path` 可指向本地视频文件代替摄像头，适合离线调试。
+| 配置段 | 作用 |
+|--------|------|
+| `camera` | 输入源：USB / RealSense / 视频，及曝光等 V4L2 控制 |
+| `model` | 3class YOLO 路径与阈值 |
+| `detector` | 检测器组合开关 |
+| `weaponhead_detector` | 第二路 YOLO 模型 |
+| `lightbar_detector` | 灯条 OpenCV 算法可调参数 |
+| `display.debug` | CLI 是否弹窗显示 |
 
 ---
 
 ## 模型
 
-仓库提供的预训练 ONNX 模型位于 `kfs_core/models/`：
+预训练权重在 `kfs_core/models/`：
 
-| 文件 | 用途 | 训练数据 |
-|------|------|----------|
-| `kfs_yolo11_3class.onnx` | 功夫卷轴 3 分类 | — |
-| `kfs_weaponhead_v1.onnx` | 武器头检测 (多边形标注原图训练) | 多边形 JSON 标注 |
-| `kfs_weaponhead_v2.onnx` | 武器头检测 (去畸变 bbox 训练) | 去畸变 YOLO bbox |
-
-> 推荐使用 `kfs_weaponhead_v1.onnx`（mAP50-95 = 0.8913，效果更优）。
+| 文件 | 用途 |
+|------|------|
+| `kfs_yolo11_3class.onnx` | 功夫卷轴 3 分类 |
+| `whv4.onnx` | 武器头检测（当前配置默认） |
+| `kfs_weaponhead_v1.onnx` / `v2` | 武器头备选 |
+| `*_fp16.onnx` | FP16 变体（导出脚本生成） |
 
 ### 导出 ONNX
 
 ```bash
-cd /home/lee/realsense_inference/kfs_core
-
-# 自动查找 best.pt 并导出 ONNX
+cd kfs_core
 python scripts/export_onnx.py
-
-# 指定路径
-python scripts/export_onnx.py \
-    --pt /path/to/best.pt \
-    --output models/my_model.onnx \
-    --imgsz 640
+python scripts/export_onnx.py --pt /path/to/best.pt --output models/my_model.onnx --imgsz 640
+python scripts/export_fp16.py   # 如需 FP16
 ```
 
 ---
 
 ## 相机标定
 
-USB 摄像头可通过棋盘格标定生成 `ost.yaml`，用于在线去畸变。
-
 ```bash
-cd /home/lee/realsense_inference
-
 python3 kfs_core/scripts/calibrate_camera.py \
   --video kfs_core/assets/calib.mp4 \
   --size 11x8 \
   --square 0.02 \
   --output kfs_core/config/ost.yaml \
-  --scale 1.0 \
   --sample-every 10 \
   --max-samples 20
 ```
 
-标定完成后在 YAML 中启用：
+在 YAML 中启用：
 
 ```yaml
 camera:
@@ -354,8 +408,6 @@ camera:
     undistort: true
 ```
 
-> 注意：开启去畸变后，推理模型应使用去畸变数据重新训练或验证效果。
-
 ---
 
 ## 目录结构
@@ -363,87 +415,97 @@ camera:
 ```
 realsense_inference/
 ├── README.md
-├── kfs_core/                          # ROS2 功能包
-│   ├── CMakeLists.txt                 # CMake 构建 (colcon + 独立模式)
-│   ├── package.xml                    # ROS2 包描述
-│   ├── cmake/
-│   │   └── FindOnnxRuntime.cmake      # ONNX Runtime 查找模块
+├── kfs_core/
+│   ├── CMakeLists.txt
+│   ├── package.xml
+│   ├── cmake/FindOnnxRuntime.cmake
 │   ├── include/
-│   │   ├── yolo_detector.h            # YOLO ONNX 推理器
-│   │   ├── usb_capture.h             # USB 摄像头采集
-│   │   ├── rs_capture.h              # RealSense 采集
+│   │   ├── yolo_detector.h            # YOLO ONNX + Detection / FrameResult
+│   │   ├── lightbar_detector.h        # 灯条 OpenCV 检测器
+│   │   ├── usb_capture.h / rs_capture.h
 │   │   └── kfs_core/
-│   │       ├── config.h              # 配置结构 + YAML 加载
-│   │       ├── icamera_capture.h     # 相机抽象接口
-│   │       └── camera_factory.h      # 相机工厂
+│   │       ├── config.h               # Config / LightbarConfig / YAML
+│   │       ├── icamera_capture.h
+│   │       └── camera_factory.h
 │   ├── src/
-│   │   ├── kfs_infer_node.cpp        # ROS2 推理节点 (双 YOLO 并行主循环)
-│   │   ├── yolo_detector.cpp         # ONNX Runtime 推理核心
-│   │   ├── usb_capture.cpp           # V4L2 USB 捕获
-│   │   ├── rs_capture.cpp            # RealSense 捕获
-│   │   ├── config.cpp                # YAML 配置加载
-│   │   ├── camera_factory.cpp        # 相机工厂实现
-│   │   └── main.cpp                  # CLI Demo 入口
-│   ├── msg/
-│   │   ├── InferResult.msg           # 单检测框结构
-│   │   └── InferResults.msg          # 一帧完整检测结果 (数组消息)
-│   ├── srv/
-│   │   └── SetInferState.srv         # 推理启停控制
+│   │   ├── kfs_infer_node.cpp         # ROS2 节点
+│   │   ├── main.cpp                   # CLI
+│   │   ├── yolo_detector.cpp
+│   │   ├── lightbar_detector.cpp
+│   │   ├── config.cpp / camera_factory.cpp
+│   │   └── usb_capture.cpp / rs_capture.cpp
+│   ├── msg/  InferResult.msg  InferResults.msg
+│   ├── srv/  SetInferState.srv
 │   ├── config/
-│   │   └── kfs_config.yaml           # 默认配置文件
-│   ├── models/                        # ONNX 模型
-│   │   ├── kfs_yolo11_3class.onnx     # 卷轴识别
-│   │   ├── kfs_weaponhead_v1.onnx     # 武器头识别 (推荐)
-│   │   └── kfs_weaponhead_v2.onnx     # 武器头识别 (备选)
+│   │   ├── kfs_config.yaml
+│   │   └── ost.yaml
+│   ├── models/                        # ONNX 权重
 │   ├── scripts/
-│   │   ├── export_onnx.py            # YOLO → ONNX 导出
-│   │   └── calibrate_camera.py       # 相机标定脚本
-│   └── assets/                        # 测试图片、数据集等 (gitignored)
-├── build/                             # colcon 构建产物
-├── install/                           # colcon 安装产物
-└── log/                               # colcon 日志
+│   │   ├── export_onnx.py / export_fp16.py
+│   │   └── calibrate_camera.py
+│   └── assets/
+│       ├── lightbar/                  # 灯条测试图 (红/绿/蓝/黄)
+│       ├── lightbar_debug/            # 标注与掩膜参考
+│       ├── *.mp4 / *.png              # 其它测试素材
+│       └── yolo_dataset/              # 训练数据样例
+├── build/  install/  log/             # colcon 产物
 ```
 
 ---
 
-## 集成到你的 ROS2 功能包
+## 集成到其它 ROS2 包
 
 ```cmake
-# 在你的 CMakeLists.txt 中:
 find_package(kfs_core REQUIRED)
-target_link_libraries(your_node kfs::kfs_core)
+target_link_libraries(your_node kfs_core_lib)  # 或导出目标 kfs::kfs_core（视安装导出而定）
 ```
 
 ```cpp
-// 在你的 ROS2 节点中:
 #include "kfs_core/config.h"
 #include "kfs_core/camera_factory.h"
 #include "yolo_detector.h"
+#include "lightbar_detector.h"
 
-auto cfg = kfs::loadConfig("config.yaml");
+auto cfg = kfs::loadConfig("kfs_core/config/kfs_config.yaml");
 auto cam = kfs::CameraFactory::create(cfg);
 
-// 卷轴识别
-YoloDetector scroll_detector(cfg.model);
-// 武器头识别 (并行)
-std::unique_ptr<YoloDetector> wh_detector;
-if (!cfg.weaponhead.whModelPath.empty())
-    wh_detector = std::make_unique<YoloDetector>(cfg.weaponhead.whModelPath);
+std::unique_ptr<YoloDetector> yolo;
+if (cfg.detectorType != "lightbar")
+    yolo = std::make_unique<YoloDetector>(cfg.model);
+
+std::unique_ptr<LightbarDetector> lightbar;
+if (cfg.enableLightbarDetector || cfg.detectorType == "lightbar")
+    lightbar = std::make_unique<LightbarDetector>(cfg.lightbar);
 
 cam->start();
-while (rclcpp::ok()) {
-    cv::Mat frame;
-    cam->getFrame(frame);
+cv::Mat frame;
+while (/* ... */) {
+    if (!cam->getFrame(frame) || frame.empty()) continue;
 
-    auto result = scroll_detector.detect(frame);        // 卷轴检测
-    if (wh_detector) {
-        auto wh_result = wh_detector->detect(frame);    // 武器头检测
+    FrameResult result;
+    if (yolo) result = yolo->detect(frame);
+    if (lightbar) {
+        auto lb = lightbar->detect(frame);
         result.detections.insert(result.detections.end(),
-            wh_result.detections.begin(), wh_result.detections.end());
+            lb.detections.begin(), lb.detections.end());
+        result.inference_ms += lb.inference_ms;
     }
-    // result 同时包含 R1/T/F 和 weaponhead
+    // result.detections: R1/T/F, WEAPONHEAD, LIGHTBAR_*
 }
 ```
+
+---
+
+## 常见问题
+
+| 现象 | 处理 |
+|------|------|
+| `libkfs_core_lib.so: cannot open shared object` | `export LD_LIBRARY_PATH=.../install/kfs_core/lib:$LD_LIBRARY_PATH` |
+| 无 USB 相机 | `camera.type: video` + 本地 mp4，或 `--image` 测图 |
+| 仅测灯条仍加载 YOLO | `detector.type: lightbar` |
+| 黄灯框过大 | 提高 `max_short_side` 约束已内置；可调高 `core_thresh_min` / 查看 `save_debug_mask` |
+| 斜向灯条漏检 | 已支持任意角度共线；检查 `min_length_ratio`、`max_angle_diff` |
+| CUDA 不可用 | `use_cuda: false`，自动回退 CPU |
 
 ---
 

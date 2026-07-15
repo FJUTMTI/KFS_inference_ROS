@@ -65,6 +65,7 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include <memory>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -613,11 +614,17 @@ private:
             }
             if (wh_yolo_detector_) {
                 auto why_res = wh_yolo_detector_->detect(frame);
-                for (auto& d : why_res.detections) {
+                // 只保留置信度最高的 1 个 WEAPONHEAD (NMS 后仍可能有多余框)
+                if (!why_res.detections.empty()) {
+                    auto best = std::max_element(
+                        why_res.detections.begin(), why_res.detections.end(),
+                        [](const Detection& a, const Detection& b) {
+                            return a.confidence < b.confidence;
+                        });
                     // 标记为 WEAPONHEAD class，避免与3class ID冲突
-                    d.class_id = 99;
-                    d.class_name = "WEAPONHEAD";
-                    result.detections.push_back(std::move(d));
+                    best->class_id = 99;
+                    best->class_name = "WEAPONHEAD";
+                    result.detections.push_back(std::move(*best));
                 }
                 result.inference_ms += why_res.inference_ms;
             }

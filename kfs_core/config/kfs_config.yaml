@@ -9,7 +9,7 @@ camera:
     path: "kfs_core/assets/005.mp4"
     loop: true
     calibration_file: "kfs_core/config/ost.yaml"  # 可选, 复用标定
-    undistort: true
+    undistort: false
   usb:
     device: 0
     width: 1920
@@ -28,7 +28,7 @@ camera:
     white_balance: -1     # -1=自动白平衡
     sharpness: 50         # V4L2 范围 0~100, 默认 75
 model:
-  path: kfs_core/models/kfs_yolo11_3class.onnx  # 相对工作空间根目录；若从 kfs_core/ 内运行请改为 models/...
+  path: kfs_core/models/KFS_full_3class_with_sim.onnx  # 相对工作空间根目录；若从 kfs_core/ 内运行请改为 models/...
 
   input_size: 640
   conf_threshold: 0.25
@@ -56,7 +56,7 @@ detector:
 weaponhead_detector:
   enabled: true
   # YOLO 模型路径 (与3class并行推理, 空字符串=不使用)
-  wh_model_path: "kfs_core/models/whv4.onnx"
+  wh_model_path: "kfs_core/models/weaponhead_yolo11l.onnx"
 
 # ============================================================
 # 灯条检测器 (传统 OpenCV: 高亮核心 + 形态学 + bloom 通道差)
@@ -65,7 +65,7 @@ weaponhead_detector:
 # 将 detector.type 设为 lightbar 后无需 YOLO 模型
 # ============================================================
 lightbar_detector:
-  enabled: true
+  enabled: false
   # 高亮灯芯 (过胖 bloom 如黄灯会自动抬阈值)
   core_percentile: 99.8
   core_thresh_min: 200
